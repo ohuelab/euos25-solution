@@ -212,7 +212,7 @@ class LGBMClassifier(BaseClfModel):
             raise ValueError("Model not fitted")
 
         path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.mkdir(parents=True, exist_ok=True)
 
         # Save model
         model_path = path / "model.txt"
