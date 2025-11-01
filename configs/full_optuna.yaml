@@ -29,8 +29,13 @@ model:
     reg_lambda: 0.1
 
 imbalance:
-  use_pos_weight: true
+  use_pos_weight: true  # Set to false and use_focal_loss: true to use focal loss instead
   pos_weight_from_data: true
+  # Alternative: use focal loss instead
+  # use_pos_weight: false
+  # use_focal_loss: true
+  # focal_alpha: 0.25
+  # focal_gamma: 2.0
 
 plates:
   normalize: false
@@ -40,7 +45,7 @@ metrics:
   - roc_auc
   - pr_auc
 
-early_stopping_rounds: 100
+early_stopping_rounds: 200
 early_stopping_metric: roc_auc
 
 log_level: INFO
@@ -52,24 +57,28 @@ optuna:
   timeout: null  # No timeout (in seconds)
   study_name: full_tuning
 
-  # LGBM parameter search ranges
-  learning_rate_min: 0.01
-  learning_rate_max: 0.1
-  num_leaves_min: 63
-  num_leaves_max: 511
-  max_depth_min: 5
-  max_depth_max: 12
-  subsample_min: 0.6
-  subsample_max: 1.0
-  colsample_bytree_min: 0.6
-  colsample_bytree_max: 1.0
-  min_child_samples_min: 5
-  min_child_samples_max: 50
-  reg_alpha_min: 0.0
-  reg_alpha_max: 1.0
-  reg_lambda_min: 0.0
-  reg_lambda_max: 1.0
-
-  # pos_weight multiplier search range (when use_pos_weight=True)
-  pos_weight_multiplier_min: 0.5
-  pos_weight_multiplier_max: 2.0
+  # LGBM parameters to tune
+  # Any parameter not listed here will use the fixed value from model.params
+  lgbm_params:
+    learning_rate:
+      type: float
+      min: 0.01
+      max: 0.08
+    num_leaves:
+      type: int
+      min: 63
+      max: 511
+    min_child_samples:
+      type: int
+      min: 5
+      max: 50
+    reg_alpha:
+      type: float
+      min: 0.001
+      max: 1.0
+      log: true
+  pos_weight_params:
+    pos_weight_multiplier:
+      type: float
+      min: 0.5
+      max: 2.0

@@ -3,7 +3,7 @@
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 import optuna
@@ -17,106 +17,168 @@ from euos25.utils.metrics import calc_metrics
 logger = logging.getLogger(__name__)
 
 
-def suggest_lgbm_params(trial: optuna.Trial, config: Config) -> Dict[str, Any]:
-    """Suggest LGBM hyperparameters for Optuna trial.
+# Default values for parameters if not in config
+DEFAULT_PARAMS = {
+    "learning_rate": 0.03,
+    "num_leaves": 127,
+    "max_depth": -1,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "min_child_samples": 20,
+    "reg_alpha": 0.0,
+    "reg_lambda": 0.0,
+    "focal_alpha": 0.25,
+    "focal_gamma": 2.0,
+    "focal_scale": 100.0,
+    "pos_weight_multiplier": 1.0,
+}
+
+
+def suggest_param(
+    trial: optuna.Trial, param_name: str, param_config: Dict[str, Any]
+) -> Any:
+    """Suggest a single parameter value based on config.
+
+    Args:
+        trial: Optuna trial
+        param_name: Name of the parameter
+        param_config: Parameter configuration dict
+
+    Returns:
+        Suggested parameter value
+    """
+    param_type = param_config["type"]
+
+    if param_type == "float":
+        return trial.suggest_float(
+            param_name,
+            param_config["min"],
+            param_config["max"],
+            log=param_config.get("log", False),
+        )
+    elif param_type == "int":
+        return trial.suggest_int(
+            param_name,
+            int(param_config["min"]),
+            int(param_config["max"]),
+            log=param_config.get("log", False),
+        )
+    elif param_type == "categorical":
+        return trial.suggest_categorical(param_name, param_config["choices"])
+    else:
+        raise ValueError(f"Unknown parameter type: {param_type}")
+
+
+def get_fixed_value(param_name: str, config: Config) -> Any:
+    """Get fixed parameter value from config or defaults.
+
+    Args:
+        param_name: Name of the parameter
+        config: Pipeline configuration
+
+    Returns:
+        Fixed parameter value
+    """
+    # Check model params first
+    if param_name in config.model.params:
+        return config.model.params[param_name]
+
+    # Check imbalance params
+    if hasattr(config.imbalance, param_name):
+        value = getattr(config.imbalance, param_name)
+        if value is not None:
+            return value
+
+    # Fall back to defaults
+    if param_name in DEFAULT_PARAMS:
+        return DEFAULT_PARAMS[param_name]
+
+    raise ValueError(f"No fixed value found for parameter: {param_name}")
+
+
+def suggest_all_params(trial: optuna.Trial, config: Config) -> Dict[str, Any]:
+    """Suggest all hyperparameters for Optuna trial.
 
     Args:
         trial: Optuna trial
         config: Pipeline configuration
 
     Returns:
-        Dictionary of suggested parameters
+        Dictionary of all parameters (tuned and fixed)
     """
     params = {}
 
-    # Core LGBM parameters
-    params["learning_rate"] = trial.suggest_float(
+    # Suggest LGBM parameters (tuned ones from config.optuna.lgbm_params)
+    lgbm_param_names = [
         "learning_rate",
-        config.optuna.learning_rate_min,
-        config.optuna.learning_rate_max,
-        log=True,
-    )
-    params["num_leaves"] = trial.suggest_int(
         "num_leaves",
-        config.optuna.num_leaves_min,
-        config.optuna.num_leaves_max,
-    )
-    params["max_depth"] = trial.suggest_int(
         "max_depth",
-        config.optuna.max_depth_min,
-        config.optuna.max_depth_max,
-    )
-    params["subsample"] = trial.suggest_float(
         "subsample",
-        config.optuna.subsample_min,
-        config.optuna.subsample_max,
-    )
-    params["colsample_bytree"] = trial.suggest_float(
         "colsample_bytree",
-        config.optuna.colsample_bytree_min,
-        config.optuna.colsample_bytree_max,
-    )
-    params["min_child_samples"] = trial.suggest_int(
         "min_child_samples",
-        config.optuna.min_child_samples_min,
-        config.optuna.min_child_samples_max,
-    )
-    params["reg_alpha"] = trial.suggest_float(
         "reg_alpha",
-        config.optuna.reg_alpha_min,
-        config.optuna.reg_alpha_max,
-    )
-    params["reg_lambda"] = trial.suggest_float(
         "reg_lambda",
-        config.optuna.reg_lambda_min,
-        config.optuna.reg_lambda_max,
-    )
+    ]
+    for param_name in lgbm_param_names:
+        if param_name in config.optuna.lgbm_params:
+            # Tune this parameter
+            params[param_name] = suggest_param(
+                trial, param_name, config.optuna.lgbm_params[param_name]
+            )
+        else:
+            # Use fixed value
+            params[param_name] = get_fixed_value(param_name, config)
 
-    # Fixed parameters from config
+    # Check if use_pos_weight should be tuned
+    if "use_pos_weight" in config.optuna.imbalance_params:
+        use_pos_weight = suggest_param(
+            trial, "use_pos_weight", config.optuna.imbalance_params["use_pos_weight"]
+        )
+    else:
+        use_pos_weight = config.imbalance.use_pos_weight
+
+    # Imbalance handling parameters based on use_pos_weight
+    if not use_pos_weight:
+        # Use focal loss
+        params["use_focal_loss"] = True
+
+        # Suggest focal loss parameters (tuned ones from config.optuna.focal_params)
+        focal_param_names = ["focal_alpha", "focal_gamma", "focal_scale"]
+        for param_name in focal_param_names:
+            if param_name in config.optuna.focal_params:
+                # Tune this parameter
+                params[param_name] = suggest_param(
+                    trial, param_name, config.optuna.focal_params[param_name]
+                )
+            else:
+                # Use fixed value
+                params[param_name] = get_fixed_value(param_name, config)
+
+        params["pos_weight"] = None
+
+    else:
+        # Use pos_weight
+        params["use_focal_loss"] = False
+
+        # Suggest pos_weight parameters (tuned ones from config.optuna.pos_weight_params)
+        if "pos_weight_multiplier" in config.optuna.pos_weight_params:
+            # Tune this parameter
+            params["pos_weight_multiplier"] = suggest_param(
+                trial,
+                "pos_weight_multiplier",
+                config.optuna.pos_weight_params["pos_weight_multiplier"],
+            )
+        else:
+            # Use fixed value
+            params["pos_weight_multiplier"] = get_fixed_value(
+                "pos_weight_multiplier", config
+            )
+
+        params["pos_weight"] = None  # Will be computed during training
+
+    # Fixed parameters
     params["n_estimators"] = config.model.params.get("n_estimators", 1000)
     params["early_stopping_rounds"] = config.early_stopping_rounds
-
-    return params
-
-
-def suggest_imbalance_params(trial: optuna.Trial, config: Config) -> Dict[str, Any]:
-    """Suggest imbalance handling parameters for Optuna trial.
-
-    Args:
-        trial: Optuna trial
-        config: Pipeline configuration
-
-    Returns:
-        Dictionary of suggested imbalance parameters
-    """
-    params = {}
-
-    if config.imbalance.use_focal_loss:
-        # Focal loss parameters
-        params["use_focal_loss"] = True
-        params["focal_alpha"] = trial.suggest_float(
-            "focal_alpha",
-            config.optuna.focal_alpha_min,
-            config.optuna.focal_alpha_max,
-        )
-        params["focal_gamma"] = trial.suggest_float(
-            "focal_gamma",
-            config.optuna.focal_gamma_min,
-            config.optuna.focal_gamma_max,
-        )
-        params["pos_weight"] = None
-    elif config.imbalance.use_pos_weight:
-        # pos_weight multiplier (will be multiplied by computed pos_weight)
-        params["use_focal_loss"] = False
-        params["pos_weight_multiplier"] = trial.suggest_float(
-            "pos_weight_multiplier",
-            config.optuna.pos_weight_multiplier_min,
-            config.optuna.pos_weight_multiplier_max,
-        )
-        params["pos_weight"] = None  # Will be computed and multiplied
-    else:
-        params["use_focal_loss"] = False
-        params["pos_weight"] = None
 
     return params
 
@@ -140,12 +202,8 @@ def objective(
     Returns:
         Average validation score across folds
     """
-    # Suggest parameters
-    lgbm_params = suggest_lgbm_params(trial, config)
-    imbalance_params = suggest_imbalance_params(trial, config)
-
-    # Combine parameters
-    all_params = {**lgbm_params, **imbalance_params}
+    # Suggest all parameters
+    all_params = suggest_all_params(trial, config)
 
     # Run CV with these parameters
     fold_scores = []

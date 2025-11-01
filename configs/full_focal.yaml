@@ -41,8 +41,18 @@ metrics:
   - roc_auc
   - pr_auc
 
-early_stopping_rounds: 100
+early_stopping_rounds: 200
 early_stopping_metric: roc_auc
 
 log_level: INFO
+
+# Optuna hyperparameter tuning configuration
+optuna:
+  enable: false  # Set to true to enable hyperparameter tuning
+  n_trials: 100
+  timeout: null
+  study_name: full_focal_tuning
+
+  lgbm_params: {}  # Add parameters to tune here
+  focal_params: {}  # Add focal loss parameter tuning here if needed
 

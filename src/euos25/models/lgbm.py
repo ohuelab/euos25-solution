@@ -216,7 +216,8 @@ class LGBMClassifier(BaseClfModel):
         # Add any additional kwargs
         excluded_keys = [
             "name", "n_estimators", "pos_weight", "pos_weight_multiplier",
-            "early_stopping_rounds", "use_focal_loss", "focal_alpha", "focal_gamma"
+            "early_stopping_rounds", "use_focal_loss", "focal_alpha", "focal_gamma",
+            "focal_scale"
         ]
         for key, value in self.params.items():
             if key not in lgb_params and key not in excluded_keys:

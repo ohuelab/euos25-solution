@@ -45,42 +45,67 @@ class PlatesConfig(BaseModel):
     plate_col: str = "plate_id"
 
 
+class ParamSearchConfig(BaseModel):
+    """Configuration for a single parameter search.
+
+    Each parameter can specify:
+    - type: "float", "int", or "categorical"
+    - min/max: for float/int types
+    - choices: for categorical type
+    - log: whether to use log scale (for float/int)
+    """
+
+    type: str  # "float", "int", or "categorical"
+    min: Optional[float] = None
+    max: Optional[float] = None
+    choices: Optional[List[Any]] = None
+    log: bool = False  # Use log scale for float/int
+
+
 class OptunaConfig(BaseModel):
-    """Configuration for Optuna hyperparameter optimization."""
+    """Configuration for Optuna hyperparameter optimization.
+
+    Parameters are organized by category for easier management.
+    Each category can have its own set of parameters to tune.
+
+    If a parameter is not specified in any category, its value from
+    model.params or imbalance config will be used (fixed, not tuned).
+
+    Example:
+        optuna:
+          enable: true
+          n_trials: 100
+          lgbm_params:
+            learning_rate:
+              type: float
+              min: 0.01
+              max: 0.1
+              log: true
+            num_leaves:
+              type: int
+              min: 63
+              max: 511
+          focal_params:
+            focal_alpha:
+              type: float
+              min: 0.1
+              max: 0.5
+            focal_scale:
+              type: float
+              min: 50.0
+              max: 200.0
+    """
 
     enable: bool = False
     n_trials: int = 100
     timeout: Optional[int] = None  # Timeout in seconds
     study_name: Optional[str] = None
 
-    # Parameter search ranges
-    # LGBM parameters
-    learning_rate_min: float = 0.01
-    learning_rate_max: float = 0.1
-    num_leaves_min: int = 31
-    num_leaves_max: int = 511
-    max_depth_min: int = 3
-    max_depth_max: int = 12
-    subsample_min: float = 0.5
-    subsample_max: float = 1.0
-    colsample_bytree_min: float = 0.5
-    colsample_bytree_max: float = 1.0
-    min_child_samples_min: int = 5
-    min_child_samples_max: int = 100
-    reg_alpha_min: float = 0.0
-    reg_alpha_max: float = 1.0
-    reg_lambda_min: float = 0.0
-    reg_lambda_max: float = 1.0
-
-    # Focal loss parameters (when use_focal_loss=True)
-    focal_alpha_min: float = 0.1
-    focal_alpha_max: float = 0.9
-    focal_gamma_min: float = 1.0
-    focal_gamma_max: float = 5.0
-
-    # Imbalance handling (when use_pos_weight=True)
-    pos_weight_multiplier_min: float = 0.5
-    pos_weight_multiplier_max: float = 2.0
+    # Parameter search configurations by category
+    lgbm_params: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    imbalance_params: Dict[str, Dict[str, Any]] = Field(default_factory=dict)  # use_pos_weight, use_focal_loss
+    focal_params: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    pos_weight_params: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
 
 
 class Config(BaseModel):
