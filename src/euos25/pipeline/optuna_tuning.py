@@ -300,10 +300,48 @@ def tune_hyperparameters(
 
     # Create study
     study_name = config.optuna.study_name or f"{actual_task_name}_tuning"
+
+    # Setup storage if enabled
+    storage = None
+    load_if_exists = False
+    if config.optuna.storage_enable:
+        # Determine storage path
+        if config.optuna.storage_path:
+            storage_path = Path(config.optuna.storage_path)
+        else:
+            storage_path = output_path / f"{study_name}.db"
+
+        storage = f"sqlite:///{storage_path}"
+        load_if_exists = True
+        logger.info(f"Using SQLite storage: {storage}")
+        logger.info(f"  Existing study will be loaded if available")
+
+    # Check if study already exists (only if storage is enabled)
+    existing_trials = 0
+    if config.optuna.storage_enable and storage:
+        try:
+            existing_study = optuna.load_study(
+                study_name=study_name,
+                storage=storage,
+            )
+            existing_trials = len(existing_study.trials)
+            if existing_trials > 0:
+                logger.info(f"Found existing study with {existing_trials} completed trials")
+                if existing_study.best_trial:
+                    logger.info(
+                        f"  Best trial so far: {existing_study.best_trial.number} "
+                        f"(value: {existing_study.best_value:.6f})"
+                    )
+        except (ValueError, KeyError):
+            # Study doesn't exist yet, will be created
+            pass
+
     study = optuna.create_study(
         study_name=study_name,
         direction="maximize",
         sampler=optuna.samplers.TPESampler(seed=config.seed),
+        storage=storage,
+        load_if_exists=load_if_exists,
     )
 
     # Run optimization

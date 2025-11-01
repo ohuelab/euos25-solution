@@ -100,6 +100,8 @@ class OptunaConfig(BaseModel):
     n_trials: int = 100
     timeout: Optional[int] = None  # Timeout in seconds
     study_name: Optional[str] = None
+    storage_enable: bool = True  # Enable SQLite storage for persistent study (allows resuming)
+    storage_path: Optional[str] = None  # Path to SQLite database (auto-generated if None)
 
     # Parameter search configurations by category
     lgbm_params: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
