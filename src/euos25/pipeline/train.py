@@ -39,6 +39,9 @@ def create_model(config: Config) -> ClfModel:
     elif config.imbalance.use_pos_weight and config.imbalance.pos_weight_from_data:
         # Will be computed during training
         model_params["pos_weight"] = None
+        # Store multiplier for later use if set
+        if config.imbalance.pos_weight_multiplier is not None:
+            model_params["pos_weight_multiplier"] = config.imbalance.pos_weight_multiplier
     elif config.imbalance.use_pos_weight and config.imbalance.pos_weight_value:
         model_params["pos_weight"] = config.imbalance.pos_weight_value
     else:

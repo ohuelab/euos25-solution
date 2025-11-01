@@ -55,6 +55,7 @@ class LGBMClassifier(BaseClfModel):
         reg_alpha: float = 0.0,
         reg_lambda: float = 0.0,
         pos_weight: Optional[float] = None,
+        pos_weight_multiplier: Optional[float] = None,
         use_focal_loss: bool = False,
         focal_alpha: Optional[float] = None,
         focal_gamma: float = 2.0,
@@ -76,6 +77,7 @@ class LGBMClassifier(BaseClfModel):
             reg_alpha: L1 regularization
             reg_lambda: L2 regularization
             pos_weight: Weight for positive class (auto-computed if None)
+            pos_weight_multiplier: Multiplier for auto-computed pos_weight
             use_focal_loss: Whether to use focal loss (overrides pos_weight)
             focal_alpha: Alpha parameter for focal loss (auto-computed if None)
             focal_gamma: Gamma parameter for focal loss (focusing parameter)
@@ -95,6 +97,7 @@ class LGBMClassifier(BaseClfModel):
             reg_alpha=reg_alpha,
             reg_lambda=reg_lambda,
             pos_weight=pos_weight,
+            pos_weight_multiplier=pos_weight_multiplier,
             use_focal_loss=use_focal_loss,
             focal_alpha=focal_alpha,
             focal_gamma=focal_gamma,
@@ -200,13 +203,20 @@ class LGBMClassifier(BaseClfModel):
             if pos_weight is None:
                 pos_weight = self._compute_pos_weight(y)
 
+            # Apply multiplier if specified
+            pos_weight_multiplier = self.params.get("pos_weight_multiplier")
+            if pos_weight_multiplier is not None:
+                logger.info(f"Applying pos_weight_multiplier: {pos_weight_multiplier:.4f}")
+                pos_weight = pos_weight * pos_weight_multiplier
+                logger.info(f"Final pos_weight: {pos_weight:.4f}")
+
             lgb_params["objective"] = "binary"
             lgb_params["scale_pos_weight"] = pos_weight
 
         # Add any additional kwargs
         excluded_keys = [
-            "name", "n_estimators", "pos_weight", "early_stopping_rounds",
-            "use_focal_loss", "focal_alpha", "focal_gamma"
+            "name", "n_estimators", "pos_weight", "pos_weight_multiplier",
+            "early_stopping_rounds", "use_focal_loss", "focal_alpha", "focal_gamma"
         ]
         for key, value in self.params.items():
             if key not in lgb_params and key not in excluded_keys:

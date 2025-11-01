@@ -12,6 +12,7 @@ from euos25.data.splits import create_scaffold_splits, splits_to_serializable
 from euos25.pipeline.ensemble import blend_predictions, ensemble_from_directory
 from euos25.pipeline.features import build_features_from_config
 from euos25.pipeline.infer import predict_oof, predict_test
+from euos25.pipeline.optuna_tuning import tune_hyperparameters
 from euos25.pipeline.prepare import prepare_data
 from euos25.pipeline.submit import create_submission, create_final_submission, generate_timestamped_submission
 from euos25.pipeline.train import train_cv, train_full
@@ -134,6 +135,29 @@ def train(features, splits, config, outdir, label_col, data, task):
         raise ValueError(f"Label column {label_col} not found")
 
     labels = df.set_index("ID")[label_col]
+
+    # Check if Optuna mode is enabled
+    if cfg.optuna.enable:
+        logger.info("Optuna mode enabled - running hyperparameter tuning")
+        best_params = tune_hyperparameters(
+            features_path=features,
+            splits_path=splits,
+            labels=labels,
+            config=cfg,
+            output_dir=outdir,
+            task_name=task_name,
+        )
+
+        # Update config with best parameters
+        logger.info("Updating config with best parameters from Optuna")
+        for key, value in best_params.items():
+            if key in ["focal_alpha", "focal_gamma"]:
+                setattr(cfg.imbalance, key, value)
+            elif key == "pos_weight_multiplier":
+                # Store multiplier for later use
+                cfg.imbalance.pos_weight_multiplier = value
+            else:
+                cfg.model.params[key] = value
 
     # Train with CV
     fold_metrics, best_iterations, train_sizes = train_cv(
