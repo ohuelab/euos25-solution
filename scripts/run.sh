@@ -11,6 +11,7 @@ PROCESSED_DIR=data/processed
 MODEL_DIR=data/models/full
 PRED_DIR=data/preds/full
 SUBMISSION_DIR=data/submissions
+TASKS_SPEC="all"
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -39,6 +40,10 @@ while [[ $# -gt 0 ]]; do
       SUBMISSION_DIR="$2"
       shift 2
       ;;
+    --tasks)
+      TASKS_SPEC="$2"
+      shift 2
+      ;;
     --help)
       echo "Usage: $0 [OPTIONS]"
       echo ""
@@ -49,6 +54,8 @@ while [[ $# -gt 0 ]]; do
       echo "  --model-dir DIR      Model output directory (default: data/models/full)"
       echo "  --pred-dir DIR       Prediction output directory (default: data/preds/full)"
       echo "  --submission-dir DIR Submission output directory (default: data/submissions)"
+      echo "  --tasks TASKS        Comma-separated list of tasks or 'all' (default: all)"
+      echo "                       Available tasks: fluo_340_450, fluo_480, trans_340, trans_450"
       echo "  --help               Show this help message"
       exit 0
       ;;
@@ -89,6 +96,69 @@ SPLITS_FLUO_480=$PROCESSED_DIR/splits_fluo_480.json
 SPLITS_TRANS_340=$PROCESSED_DIR/splits_trans_340.json
 SPLITS_TRANS_450=$PROCESSED_DIR/splits_trans_450.json
 
+# Task mapping: task_name -> (task_name_in_code, label_col, train_file, prepared_file, feature_file, split_file)
+# Using regular arrays instead of associative arrays for bash 3.2 compatibility
+TASK_KEYS=("fluo_340_450" "fluo_480" "trans_340" "trans_450")
+TASK_VALUES=(
+  "y_fluo_any|Fluorescence|$RAW_TRAIN_FLUO_340_450|$PREPARED_TRAIN_FLUO_340_450|$FEATURES_TRAIN_FLUO_340_450|$SPLITS_FLUO_340_450"
+  "y_fluo_any|Fluorescence|$RAW_TRAIN_FLUO_480|$PREPARED_TRAIN_FLUO_480|$FEATURES_TRAIN_FLUO_480|$SPLITS_FLUO_480"
+  "y_trans_any|Transmittance|$RAW_TRAIN_TRANS_340|$PREPARED_TRAIN_TRANS_340|$FEATURES_TRAIN_TRANS_340|$SPLITS_TRANS_340"
+  "y_trans_any|Transmittance|$RAW_TRAIN_TRANS_450|$PREPARED_TRAIN_TRANS_450|$FEATURES_TRAIN_TRANS_450|$SPLITS_TRANS_450"
+)
+
+# Helper function to get task info by key
+get_task_info() {
+  local key="$1"
+  local i
+  for i in "${!TASK_KEYS[@]}"; do
+    if [ "${TASK_KEYS[$i]}" = "$key" ]; then
+      echo "${TASK_VALUES[$i]}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Build task arrays based on TASKS_SPEC
+if [ "$TASKS_SPEC" = "all" ]; then
+  TASKS=("fluo_340_450" "fluo_480" "trans_340" "trans_450")
+else
+  # Parse comma-separated task list
+  OLD_IFS=$IFS
+  IFS=',' read -ra TASKS <<< "$TASKS_SPEC"
+  IFS=$OLD_IFS
+  # Validate tasks
+  for task in "${TASKS[@]}"; do
+    task=$(echo "$task" | xargs)  # trim whitespace
+    if ! get_task_info "$task" > /dev/null 2>&1; then
+      echo "Error: Unknown task '$task'"
+      echo "Available tasks: fluo_340_450, fluo_480, trans_340, trans_450"
+      exit 1
+    fi
+  done
+fi
+
+# Build parallel arrays for selected tasks
+TASK_NAMES=()
+TRAIN_FILES=()
+PREPARED_FILES=()
+FEATURE_FILES=()
+SPLIT_FILES=()
+LABEL_COLS=()
+
+for task in "${TASKS[@]}"; do
+  task=$(echo "$task" | xargs)  # trim whitespace
+  task_info=$(get_task_info "$task")
+  OLD_IFS=$IFS
+  IFS='|' read -ra INFO <<< "$task_info"
+  IFS=$OLD_IFS
+  TASK_NAMES+=("${INFO[0]}")
+  LABEL_COLS+=("${INFO[1]}")
+  TRAIN_FILES+=("${INFO[2]}")
+  PREPARED_FILES+=("${INFO[3]}")
+  FEATURE_FILES+=("${INFO[4]}")
+  SPLIT_FILES+=("${INFO[5]}")
+done
 
 echo "==================================="
 echo "EUOS25 Full-scale Pipeline"
@@ -97,6 +167,7 @@ if [ "$FORCE" = true ]; then
 else
   echo "Mode: REUSE (will skip existing outputs)"
 fi
+echo "Tasks: ${TASKS[*]}"
 echo "==================================="
 
 # Step 1: Prepare test data (shared across all tasks)
@@ -112,14 +183,6 @@ else
 fi
 
 # Step 2: Process each task independently
-TASKS=("fluo_340_450" "fluo_480" "trans_340" "trans_450")
-TASK_NAMES=("y_fluo_any" "y_fluo_any" "y_trans_any" "y_trans_any")
-TRAIN_FILES=("$RAW_TRAIN_FLUO_340_450" "$RAW_TRAIN_FLUO_480" "$RAW_TRAIN_TRANS_340" "$RAW_TRAIN_TRANS_450")
-PREPARED_FILES=("$PREPARED_TRAIN_FLUO_340_450" "$PREPARED_TRAIN_FLUO_480" "$PREPARED_TRAIN_TRANS_340" "$PREPARED_TRAIN_TRANS_450")
-FEATURE_FILES=("$FEATURES_TRAIN_FLUO_340_450" "$FEATURES_TRAIN_FLUO_480" "$FEATURES_TRAIN_TRANS_340" "$FEATURES_TRAIN_TRANS_450")
-SPLIT_FILES=("$SPLITS_FLUO_340_450" "$SPLITS_FLUO_480" "$SPLITS_TRANS_340" "$SPLITS_TRANS_450")
-LABEL_COLS=("Fluorescence" "Fluorescence" "Transmittance" "Transmittance")
-
 for i in "${!TASKS[@]}"; do
   TASK="${TASKS[$i]}"
   TASK_NAME="${TASK_NAMES[$i]}"
@@ -279,35 +342,40 @@ for i in "${!TASKS[@]}"; do
     --out "$SUBMISSION_FILE"
 done
 
-# Step 6: Create final submission combining all tasks
-echo ""
-echo "Step 6: Creating final submission by combining all tasks..."
-FINAL_SUBMISSION_FILE="$SUBMISSION_DIR/submission_${TIMESTAMP}.csv"
+# Step 6: Create final submission combining all tasks (only if --tasks=all)
+if [ "$TASKS_SPEC" = "all" ]; then
+  echo ""
+  echo "Step 6: Creating final submission by combining all tasks..."
+  FINAL_SUBMISSION_FILE="$SUBMISSION_DIR/submission_${TIMESTAMP}.csv"
 
-# Check if all individual submission files exist
-ALL_FILES_EXIST=true
-TRAN_340_FILE="$SUBMISSION_DIR/trans_340_${TIMESTAMP}.csv"
-TRAN_450_FILE="$SUBMISSION_DIR/trans_450_${TIMESTAMP}.csv"
-FLUO_480_FILE="$SUBMISSION_DIR/fluo_480_${TIMESTAMP}.csv"
-FLUO_340_450_FILE="$SUBMISSION_DIR/fluo_340_450_${TIMESTAMP}.csv"
+  # Check if all individual submission files exist
+  ALL_FILES_EXIST=true
+  TRAN_340_FILE="$SUBMISSION_DIR/trans_340_${TIMESTAMP}.csv"
+  TRAN_450_FILE="$SUBMISSION_DIR/trans_450_${TIMESTAMP}.csv"
+  FLUO_480_FILE="$SUBMISSION_DIR/fluo_480_${TIMESTAMP}.csv"
+  FLUO_340_450_FILE="$SUBMISSION_DIR/fluo_340_450_${TIMESTAMP}.csv"
 
-for SUBMISSION_FILE in "$TRAN_340_FILE" "$TRAN_450_FILE" "$FLUO_480_FILE" "$FLUO_340_450_FILE"; do
-  if [ ! -f "$SUBMISSION_FILE" ]; then
-    echo "  Warning: Submission file $SUBMISSION_FILE not found"
+  for SUBMISSION_FILE in "$TRAN_340_FILE" "$TRAN_450_FILE" "$FLUO_480_FILE" "$FLUO_340_450_FILE"; do
+    if [ ! -f "$SUBMISSION_FILE" ]; then
+      echo "  Warning: Submission file $SUBMISSION_FILE not found"
+      ALL_FILES_EXIST=false
+    fi
+  done
+
+  if [ "$ALL_FILES_EXIST" = true ]; then
+    uv run -m euos25.cli submit-final \
+      --trans-340 "$TRAN_340_FILE" \
+      --trans-450 "$TRAN_450_FILE" \
+      --fluo-480 "$FLUO_480_FILE" \
+      --fluo-340-450 "$FLUO_340_450_FILE" \
+      --out "$FINAL_SUBMISSION_FILE"
+    echo "  Created: submission_${TIMESTAMP}.csv"
+  else
+    echo "  Warning: Could not create final submission due to missing files"
     ALL_FILES_EXIST=false
   fi
-done
-
-if [ "$ALL_FILES_EXIST" = true ]; then
-  uv run -m euos25.cli submit-final \
-    --trans-340 "$TRAN_340_FILE" \
-    --trans-450 "$TRAN_450_FILE" \
-    --fluo-480 "$FLUO_480_FILE" \
-    --fluo-340-450 "$FLUO_340_450_FILE" \
-    --out "$FINAL_SUBMISSION_FILE"
-  echo "  Created: submission_${TIMESTAMP}.csv"
 else
-  echo "  Warning: Could not create final submission due to missing files"
+  ALL_FILES_EXIST=false
 fi
 
 echo ""
@@ -322,7 +390,7 @@ echo "Submission files created:"
 for TASK in "${TASKS[@]}"; do
   echo "  - ${TASK}_${TIMESTAMP}.csv"
 done
-if [ "$ALL_FILES_EXIST" = true ]; then
+if [ "$TASKS_SPEC" = "all" ] && [ "$ALL_FILES_EXIST" = true ]; then
   echo "  - submission_${TIMESTAMP}.csv (FINAL)"
 fi
 echo ""
