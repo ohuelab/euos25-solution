@@ -13,7 +13,7 @@ from euos25.pipeline.ensemble import blend_predictions, ensemble_from_directory
 from euos25.pipeline.features import build_features_from_config
 from euos25.pipeline.infer import predict_oof, predict_test
 from euos25.pipeline.prepare import prepare_data
-from euos25.pipeline.submit import create_submission, generate_timestamped_submission
+from euos25.pipeline.submit import create_submission, create_final_submission, generate_timestamped_submission
 from euos25.pipeline.train import train_cv
 from euos25.utils.io import load_csv, save_json
 from euos25.utils.seed import set_seed
@@ -220,6 +220,27 @@ def submit(pred, out):
     )
 
     logger.info(f"Saved submission to {out}")
+
+
+@cli.command()
+@click.option("--trans-340", required=True, help="trans_340 submission CSV file")
+@click.option("--trans-450", required=True, help="trans_450 submission CSV file")
+@click.option("--fluo-480", required=True, help="fluo_480 submission CSV file")
+@click.option("--fluo-340-450", required=True, help="fluo_340_450 submission CSV file")
+@click.option("--out", required=True, help="Output final submission CSV file")
+def submit_final(trans_340, trans_450, fluo_480, fluo_340_450, out):
+    """Create final submission file by combining all task submissions."""
+    logger.info("Creating final submission")
+
+    create_final_submission(
+        trans_340_path=trans_340,
+        trans_450_path=trans_450,
+        fluo_480_path=fluo_480,
+        fluo_340_450_path=fluo_340_450,
+        output_path=out,
+    )
+
+    logger.info(f"Saved final submission to {out}")
 
 
 @cli.command()

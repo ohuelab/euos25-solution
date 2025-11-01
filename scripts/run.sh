@@ -254,6 +254,37 @@ for TASK in "${TASKS[@]}"; do
     --out "$SUBMISSION_FILE"
 done
 
+# Step 6: Create final submission combining all tasks
+echo ""
+echo "Step 6: Creating final submission by combining all tasks..."
+FINAL_SUBMISSION_FILE="$SUBMISSION_DIR/final_submission_${TIMESTAMP}.csv"
+
+# Check if all individual submission files exist
+ALL_FILES_EXIST=true
+TRAN_340_FILE="$SUBMISSION_DIR/trans_340_${TIMESTAMP}.csv"
+TRAN_450_FILE="$SUBMISSION_DIR/trans_450_${TIMESTAMP}.csv"
+FLUO_480_FILE="$SUBMISSION_DIR/fluo_480_${TIMESTAMP}.csv"
+FLUO_340_450_FILE="$SUBMISSION_DIR/fluo_340_450_${TIMESTAMP}.csv"
+
+for SUBMISSION_FILE in "$TRAN_340_FILE" "$TRAN_450_FILE" "$FLUO_480_FILE" "$FLUO_340_450_FILE"; do
+  if [ ! -f "$SUBMISSION_FILE" ]; then
+    echo "  Warning: Submission file $SUBMISSION_FILE not found"
+    ALL_FILES_EXIST=false
+  fi
+done
+
+if [ "$ALL_FILES_EXIST" = true ]; then
+  uv run -m euos25.cli submit-final \
+    --trans-340 "$TRAN_340_FILE" \
+    --trans-450 "$TRAN_450_FILE" \
+    --fluo-480 "$FLUO_480_FILE" \
+    --fluo-340-450 "$FLUO_340_450_FILE" \
+    --out "$FINAL_SUBMISSION_FILE"
+  echo "  Created: final_submission_${TIMESTAMP}.csv"
+else
+  echo "  Warning: Could not create final submission due to missing files"
+fi
+
 echo ""
 echo "==================================="
 echo "Pipeline completed successfully!"
@@ -266,4 +297,7 @@ echo "Submission files created:"
 for TASK in "${TASKS[@]}"; do
   echo "  - ${TASK}_${TIMESTAMP}.csv"
 done
+if [ "$ALL_FILES_EXIST" = true ]; then
+  echo "  - final_submission_${TIMESTAMP}.csv (FINAL)"
+fi
 echo ""
