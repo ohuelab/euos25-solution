@@ -148,12 +148,16 @@ def train(features, splits, config, outdir, label_col, data):
 @click.option("--model-dir", required=True, help="Directory with trained models")
 @click.option("--outdir", required=True, help="Output directory for predictions")
 @click.option("--mode", default="oof", help="Prediction mode: 'oof' or 'test'")
-def infer(features, splits, config, model_dir, outdir, mode):
+@click.option("--task", default=None, help="Task name override (e.g., 'y_fluo_any', 'y_trans_any')")
+def infer(features, splits, config, model_dir, outdir, mode, task):
     """Generate predictions."""
     logger.info(f"Generating {mode} predictions")
 
     # Load config
     cfg = load_config(config)
+
+    # Override task name if provided
+    task_name = task if task is not None else cfg.task
 
     # Set seed
     set_seed(cfg.seed)
@@ -162,7 +166,7 @@ def infer(features, splits, config, model_dir, outdir, mode):
     Path(outdir).mkdir(parents=True, exist_ok=True)
 
     if mode == "oof":
-        output_path = Path(outdir) / f"{cfg.task}_oof.csv"
+        output_path = Path(outdir) / f"{task_name}_oof.csv"
         predict_oof(
             features_path=features,
             splits_path=splits,
@@ -171,7 +175,7 @@ def infer(features, splits, config, model_dir, outdir, mode):
             output_path=str(output_path),
         )
     elif mode == "test":
-        output_path = Path(outdir) / f"{cfg.task}_test.csv"
+        output_path = Path(outdir) / f"{task_name}_test.csv"
         predict_test(
             features_path=features,
             model_dir=model_dir,

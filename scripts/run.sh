@@ -4,6 +4,19 @@ set -euo pipefail
 # EUOS25 Full-scale Pipeline
 # This script runs the complete pipeline with all 4 tasks (fluorescence340_450, fluorescence480, transmittance340, transmittance450)
 
+# Parse arguments
+FORCE=false
+for arg in "$@"; do
+  case $arg in
+    --force)
+      FORCE=true
+      shift
+      ;;
+    *)
+      ;;
+  esac
+done
+
 CONF=configs/full.yaml
 RAW_TEST=data/raw/euos25_challenge_test.csv
 
@@ -40,15 +53,24 @@ SUBMISSION_DIR=data/submissions
 
 echo "==================================="
 echo "EUOS25 Full-scale Pipeline"
+if [ "$FORCE" = true ]; then
+  echo "Mode: FORCE (will regenerate all outputs)"
+else
+  echo "Mode: REUSE (will skip existing outputs)"
+fi
 echo "==================================="
 
 # Step 1: Prepare test data (shared across all tasks)
 echo ""
 echo "Step 1: Preparing test data..."
-uv run -m euos25.cli prepare \
-  --input $RAW_TEST \
-  --output $PREPARED_TEST \
-  --normalize --deduplicate
+if [ "$FORCE" = true ] || [ ! -f "$PREPARED_TEST" ]; then
+  uv run -m euos25.cli prepare \
+    --input $RAW_TEST \
+    --output $PREPARED_TEST \
+    --normalize --deduplicate
+else
+  echo "  Skipping: $PREPARED_TEST already exists"
+fi
 
 # Step 2: Process each task independently
 TASKS=("fluo_340_450" "fluo_480" "trans_340" "trans_450")
@@ -74,60 +96,101 @@ for i in "${!TASKS[@]}"; do
   # Prepare training data
   echo ""
   echo "Step 2a: Preparing training data for $TASK..."
-  uv run -m euos25.cli prepare \
-    --input "$TRAIN_FILE" \
-    --output "$PREPARED_FILE" \
-    --normalize --deduplicate
+  if [ "$FORCE" = true ] || [ ! -f "$PREPARED_FILE" ]; then
+    uv run -m euos25.cli prepare \
+      --input "$TRAIN_FILE" \
+      --output "$PREPARED_FILE" \
+      --normalize --deduplicate
+  else
+    echo "  Skipping: $PREPARED_FILE already exists"
+  fi
 
   # Create splits
   echo ""
   echo "Step 2b: Creating scaffold splits for $TASK..."
-  uv run -m euos25.cli make-splits \
-    --input "$PREPARED_FILE" \
-    --output "$SPLIT_FILE" \
-    --folds 5 \
-    --seed 42 \
-    --scaffold-min-size 10 \
-    --label-col "$LABEL_COL"
+  if [ "$FORCE" = true ] || [ ! -f "$SPLIT_FILE" ]; then
+    uv run -m euos25.cli make-splits \
+      --input "$PREPARED_FILE" \
+      --output "$SPLIT_FILE" \
+      --folds 5 \
+      --seed 42 \
+      --scaffold-min-size 10 \
+      --label-col "$LABEL_COL"
+  else
+    echo "  Skipping: $SPLIT_FILE already exists"
+  fi
 
   # Build training features
   echo ""
   echo "Step 2c: Building training features for $TASK..."
-  uv run -m euos25.cli build-features \
-    --input "$PREPARED_FILE" \
-    --output "$FEATURE_FILE" \
-    --config $CONF
+  if [ "$FORCE" = true ] || [ ! -f "$FEATURE_FILE" ]; then
+    uv run -m euos25.cli build-features \
+      --input "$PREPARED_FILE" \
+      --output "$FEATURE_FILE" \
+      --config $CONF
+  else
+    echo "  Skipping: $FEATURE_FILE already exists"
+  fi
 
   # Train models
   echo ""
   echo "Step 2d: Training models for $TASK..."
-  uv run -m euos25.cli train \
-    --features "$FEATURE_FILE" \
-    --splits "$SPLIT_FILE" \
-    --config $CONF \
-    --outdir "$MODEL_DIR/$TASK" \
-    --data "$PREPARED_FILE" \
-    --label-col "$LABEL_COL"
+
+  # Determine the task name based on dataset
+  if [[ "$TASK" == fluo_* ]]; then
+    TASK_NAME="y_fluo_any"
+  else
+    TASK_NAME="y_trans_any"
+  fi
+
+  # Check if at least one model file exists
+  MODEL_EXISTS=false
+  if [ -f "$MODEL_DIR/$TASK/$TASK_NAME/lgbm/fold_0/model.txt" ]; then
+    MODEL_EXISTS=true
+  fi
+
+  if [ "$FORCE" = true ] || [ "$MODEL_EXISTS" = false ]; then
+    uv run -m euos25.cli train \
+      --features "$FEATURE_FILE" \
+      --splits "$SPLIT_FILE" \
+      --config $CONF \
+      --outdir "$MODEL_DIR/$TASK" \
+      --data "$PREPARED_FILE" \
+      --label-col "$LABEL_COL"
+  else
+    echo "  Skipping: Models in $MODEL_DIR/$TASK/$TASK_NAME already exist"
+  fi
 
   # Generate OOF predictions
   echo ""
   echo "Step 2e: Generating OOF predictions for $TASK..."
-  uv run -m euos25.cli infer \
-    --features "$FEATURE_FILE" \
-    --splits "$SPLIT_FILE" \
-    --config $CONF \
-    --model-dir "$MODEL_DIR/$TASK" \
-    --outdir "$PRED_DIR/$TASK" \
-    --mode oof
+
+  OOF_OUTPUT="$PRED_DIR/$TASK/${TASK_NAME}_oof.csv"
+  if [ "$FORCE" = true ] || [ ! -f "$OOF_OUTPUT" ]; then
+    uv run -m euos25.cli infer \
+      --features "$FEATURE_FILE" \
+      --splits "$SPLIT_FILE" \
+      --config $CONF \
+      --model-dir "$MODEL_DIR/$TASK" \
+      --outdir "$PRED_DIR/$TASK" \
+      --mode oof \
+      --task "$TASK_NAME"
+  else
+    echo "  Skipping: $OOF_OUTPUT already exists"
+  fi
 done
 
 # Step 3: Build test features (shared features for all tasks)
 echo ""
 echo "Step 3: Building test features..."
-uv run -m euos25.cli build-features \
-  --input $PREPARED_TEST \
-  --output $FEATURES_TEST \
-  --config $CONF
+if [ "$FORCE" = true ] || [ ! -f "$FEATURES_TEST" ]; then
+  uv run -m euos25.cli build-features \
+    --input $PREPARED_TEST \
+    --output $FEATURES_TEST \
+    --config $CONF
+else
+  echo "  Skipping: $FEATURES_TEST already exists"
+fi
 
 # Step 4: Generate test predictions for each task
 echo ""
@@ -138,13 +201,27 @@ for i in "${!TASKS[@]}"; do
 
   echo ""
   echo "Step 4a: Generating test predictions for $TASK..."
-  uv run -m euos25.cli infer \
-    --features $FEATURES_TEST \
-    --splits "$SPLIT_FILE" \
-    --config $CONF \
-    --model-dir "$MODEL_DIR/$TASK" \
-    --outdir "$PRED_DIR/$TASK" \
-    --mode test
+
+  # Determine the task name based on dataset
+  if [[ "$TASK" == fluo_* ]]; then
+    TASK_NAME="y_fluo_any"
+  else
+    TASK_NAME="y_trans_any"
+  fi
+
+  TEST_OUTPUT="$PRED_DIR/$TASK/${TASK_NAME}_test.csv"
+  if [ "$FORCE" = true ] || [ ! -f "$TEST_OUTPUT" ]; then
+    uv run -m euos25.cli infer \
+      --features $FEATURES_TEST \
+      --splits "$SPLIT_FILE" \
+      --config $CONF \
+      --model-dir "$MODEL_DIR/$TASK" \
+      --outdir "$PRED_DIR/$TASK" \
+      --mode test \
+      --task "$TASK_NAME"
+  else
+    echo "  Skipping: $TEST_OUTPUT already exists"
+  fi
 done
 
 # Step 5: Create submissions for each task
@@ -163,9 +240,18 @@ for TASK in "${TASKS[@]}"; do
     OUTPUT_COL="y_trans_any"
   fi
 
+  SUBMISSION_FILE="$SUBMISSION_DIR/${TASK}_${TIMESTAMP}.csv"
+  # Submissions are always created with timestamp, so we don't skip them
+  # But we can check if the input prediction file exists
+  PRED_INPUT="$PRED_DIR/$TASK/${OUTPUT_COL}_test.csv"
+  if [ ! -f "$PRED_INPUT" ]; then
+    echo "  Warning: Prediction file $PRED_INPUT not found, skipping submission"
+    continue
+  fi
+
   uv run -m euos25.cli submit \
-    --pred "$PRED_DIR/$TASK/${OUTPUT_COL}_test.csv" \
-    --out "$SUBMISSION_DIR/${TASK}_${TIMESTAMP}.csv"
+    --pred "$PRED_INPUT" \
+    --out "$SUBMISSION_FILE"
 done
 
 echo ""
