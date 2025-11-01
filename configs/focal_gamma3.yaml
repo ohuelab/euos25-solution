@@ -30,7 +30,7 @@ model:
 imbalance:
   use_pos_weight: false
   use_focal_loss: true
-  focal_alpha: null  # Auto-computed from data
+  focal_alpha: 0.25
   focal_gamma: 3.0   # Higher gamma for extreme imbalance (0.24% positive rate)
 
 plates:
@@ -45,4 +45,3 @@ early_stopping_rounds: 100
 early_stopping_metric: roc_auc
 
 log_level: INFO
-

@@ -30,7 +30,7 @@ model:
 imbalance:
   use_pos_weight: false
   use_focal_loss: true
-  focal_alpha: null  # Auto-computed from data
+  focal_alpha: 0.25
   focal_gamma: 2.0   # Focusing parameter (2-3 recommended for extreme imbalance)
 
 plates:
