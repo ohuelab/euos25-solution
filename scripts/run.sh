@@ -136,12 +136,10 @@ for i in "${!TASKS[@]}"; do
   echo ""
   echo "Step 2d: Training models for $TASK..."
 
-  # Determine the task name based on dataset
-  if [[ "$TASK" == fluo_* ]]; then
-    TASK_NAME="y_fluo_any"
-  else
-    TASK_NAME="y_trans_any"
-  fi
+  # Task name is determined by config.task in the YAML file (currently y_fluo_any for all tasks)
+  # We need to check the actual directory that will be created by the train command
+  # The train command uses config.task, which is set to y_fluo_any in full.yaml
+  TASK_NAME="y_fluo_any"
 
   # Check if at least one model file exists
   MODEL_EXISTS=false
@@ -202,12 +200,8 @@ for i in "${!TASKS[@]}"; do
   echo ""
   echo "Step 4a: Generating test predictions for $TASK..."
 
-  # Determine the task name based on dataset
-  if [[ "$TASK" == fluo_* ]]; then
-    TASK_NAME="y_fluo_any"
-  else
-    TASK_NAME="y_trans_any"
-  fi
+  # Task name is determined by config.task in the YAML file (currently y_fluo_any for all tasks)
+  TASK_NAME="y_fluo_any"
 
   TEST_OUTPUT="$PRED_DIR/$TASK/${TASK_NAME}_test.csv"
   if [ "$FORCE" = true ] || [ ! -f "$TEST_OUTPUT" ]; then
@@ -233,12 +227,8 @@ for TASK in "${TASKS[@]}"; do
   echo ""
   echo "Step 5a: Creating submission for $TASK..."
 
-  # Determine the output column name based on task
-  if [[ "$TASK" == fluo_* ]]; then
-    OUTPUT_COL="y_fluo_any"
-  else
-    OUTPUT_COL="y_trans_any"
-  fi
+  # Output column name is determined by config.task in the YAML file (currently y_fluo_any for all tasks)
+  OUTPUT_COL="y_fluo_any"
 
   SUBMISSION_FILE="$SUBMISSION_DIR/${TASK}_${TIMESTAMP}.csv"
   # Submissions are always created with timestamp, so we don't skip them
