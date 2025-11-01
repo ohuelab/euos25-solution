@@ -4,22 +4,65 @@ set -euo pipefail
 # EUOS25 Full-scale Pipeline
 # This script runs the complete pipeline with all 4 tasks (fluorescence340_450, fluorescence480, transmittance340, transmittance450)
 
-# Parse arguments
+# Default values
 FORCE=false
-for arg in "$@"; do
-  case $arg in
+CONF=configs/full.yaml
+PROCESSED_DIR=data/processed
+MODEL_DIR=data/models/full
+PRED_DIR=data/preds/full
+SUBMISSION_DIR=data/submissions
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+  case $1 in
     --force)
       FORCE=true
       shift
       ;;
+    --config)
+      CONF="$2"
+      shift 2
+      ;;
+    --processed-dir)
+      PROCESSED_DIR="$2"
+      shift 2
+      ;;
+    --model-dir)
+      MODEL_DIR="$2"
+      shift 2
+      ;;
+    --pred-dir)
+      PRED_DIR="$2"
+      shift 2
+      ;;
+    --submission-dir)
+      SUBMISSION_DIR="$2"
+      shift 2
+      ;;
+    --help)
+      echo "Usage: $0 [OPTIONS]"
+      echo ""
+      echo "Options:"
+      echo "  --force              Force regeneration of all outputs (default: false)"
+      echo "  --config PATH        Configuration file path (default: configs/full.yaml)"
+      echo "  --processed-dir DIR  Processed data directory (default: data/processed)"
+      echo "  --model-dir DIR      Model output directory (default: data/models/full)"
+      echo "  --pred-dir DIR       Prediction output directory (default: data/preds/full)"
+      echo "  --submission-dir DIR Submission output directory (default: data/submissions)"
+      echo "  --help               Show this help message"
+      exit 0
+      ;;
     *)
+      echo "Unknown option: $1"
+      echo "Use --help for usage information"
+      exit 1
       ;;
   esac
 done
 
-CONF=configs/full.yaml
-RAW_TEST=data/raw/euos25_challenge_test.csv
+# Output directories (now using variables set above or defaults)
 
+RAW_TEST=data/raw/euos25_challenge_test.csv
 # Training data files
 RAW_TRAIN_FLUO_340_450=data/raw/euos25_challenge_train_fluorescence340_450_extended.csv
 RAW_TRAIN_FLUO_480=data/raw/euos25_challenge_train_fluorescence480_extended.csv
@@ -27,29 +70,25 @@ RAW_TRAIN_TRANS_340=data/raw/euos25_challenge_train_transmittance340_extended.cs
 RAW_TRAIN_TRANS_450=data/raw/euos25_challenge_train_transmittance450_extended.csv
 
 # Prepared data files
-PREPARED_TEST=data/processed/test_prepared.csv
-PREPARED_TRAIN_FLUO_340_450=data/processed/train_fluo_340_450_prepared.csv
-PREPARED_TRAIN_FLUO_480=data/processed/train_fluo_480_prepared.csv
-PREPARED_TRAIN_TRANS_340=data/processed/train_trans_340_prepared.csv
-PREPARED_TRAIN_TRANS_450=data/processed/train_trans_450_prepared.csv
+PREPARED_TEST=$PROCESSED_DIR/test_prepared.csv
+PREPARED_TRAIN_FLUO_340_450=$PROCESSED_DIR/train_fluo_340_450_prepared.csv
+PREPARED_TRAIN_FLUO_480=$PROCESSED_DIR/train_fluo_480_prepared.csv
+PREPARED_TRAIN_TRANS_340=$PROCESSED_DIR/train_trans_340_prepared.csv
+PREPARED_TRAIN_TRANS_450=$PROCESSED_DIR/train_trans_450_prepared.csv
 
 # Feature files
-FEATURES_TEST=data/processed/features_test_full.parquet
-FEATURES_TRAIN_FLUO_340_450=data/processed/features_train_fluo_340_450.parquet
-FEATURES_TRAIN_FLUO_480=data/processed/features_train_fluo_480.parquet
-FEATURES_TRAIN_TRANS_340=data/processed/features_train_trans_340.parquet
-FEATURES_TRAIN_TRANS_450=data/processed/features_train_trans_450.parquet
+FEATURES_TEST=$PROCESSED_DIR/features_test_full.parquet
+FEATURES_TRAIN_FLUO_340_450=$PROCESSED_DIR/features_train_fluo_340_450.parquet
+FEATURES_TRAIN_FLUO_480=$PROCESSED_DIR/features_train_fluo_480.parquet
+FEATURES_TRAIN_TRANS_340=$PROCESSED_DIR/features_train_trans_340.parquet
+FEATURES_TRAIN_TRANS_450=$PROCESSED_DIR/features_train_trans_450.parquet
 
 # Split files
-SPLITS_FLUO_340_450=data/processed/splits_fluo_340_450.json
-SPLITS_FLUO_480=data/processed/splits_fluo_480.json
-SPLITS_TRANS_340=data/processed/splits_trans_340.json
-SPLITS_TRANS_450=data/processed/splits_trans_450.json
+SPLITS_FLUO_340_450=$PROCESSED_DIR/splits_fluo_340_450.json
+SPLITS_FLUO_480=$PROCESSED_DIR/splits_fluo_480.json
+SPLITS_TRANS_340=$PROCESSED_DIR/splits_trans_340.json
+SPLITS_TRANS_450=$PROCESSED_DIR/splits_trans_450.json
 
-# Output directories
-MODEL_DIR=data/models
-PRED_DIR=data/preds
-SUBMISSION_DIR=data/submissions
 
 echo "==================================="
 echo "EUOS25 Full-scale Pipeline"
