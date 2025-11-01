@@ -29,11 +29,20 @@ def create_model(config: Config) -> ClfModel:
     model_params = config.model.params.copy()
 
     # Add imbalance handling parameters
-    if config.imbalance.use_pos_weight and config.imbalance.pos_weight_from_data:
+    if config.imbalance.use_focal_loss:
+        # Use focal loss (overrides pos_weight)
+        model_params["use_focal_loss"] = True
+        model_params["focal_alpha"] = config.imbalance.focal_alpha
+        model_params["focal_gamma"] = config.imbalance.focal_gamma
+        # pos_weight is ignored when use_focal_loss is True
+        model_params["pos_weight"] = None
+    elif config.imbalance.use_pos_weight and config.imbalance.pos_weight_from_data:
         # Will be computed during training
         model_params["pos_weight"] = None
     elif config.imbalance.use_pos_weight and config.imbalance.pos_weight_value:
         model_params["pos_weight"] = config.imbalance.pos_weight_value
+    else:
+        model_params["use_focal_loss"] = False
 
     # Add early stopping parameters
     model_params["early_stopping_rounds"] = config.early_stopping_rounds

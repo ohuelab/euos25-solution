@@ -31,6 +31,9 @@ class ImbalanceConfig(BaseModel):
     pos_weight_value: Optional[float] = None
     use_sampling: bool = False
     sampling_ratio: Optional[float] = None
+    use_focal_loss: bool = False
+    focal_alpha: Optional[float] = None  # Auto-computed from data if None
+    focal_gamma: float = 2.0  # Focusing parameter (typically 2-3)
 
 
 class PlatesConfig(BaseModel):
