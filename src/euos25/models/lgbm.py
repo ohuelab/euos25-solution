@@ -13,82 +13,30 @@ from euos25.models.base import BaseClfModel
 
 logger = logging.getLogger(__name__)
 
-
-def focal_loss_objective(alpha: float, gamma: float) -> Callable:
+def focal_loss_objective(alpha: float, gamma: float, scale: float = 100.0):
     """Create focal loss objective function for LightGBM.
-
-    Focal loss: FL(p_t) = -alpha * (1 - p_t)^gamma * log(p_t)
-    where p_t = y * p + (1 - y) * (1 - p)
 
     Args:
         alpha: Weighting factor for positive class
         gamma: Focusing parameter (typically 2-3)
-
-    Returns:
-        Objective function for LightGBM
+        scale: Scaling factor for gradients
     """
-    def objective(y_true: np.ndarray, y_pred: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Focal loss objective function.
-
-        Args:
-            y_true: True binary labels
-            y_pred: Raw predictions (logits)
-
-        Returns:
-            Tuple of (gradients, hessians)
-        """
-        # Convert logits to probabilities
-        p = 1.0 / (1.0 + np.exp(-y_pred))
-
-        # Compute p_t: p_t = y * p + (1 - y) * (1 - p)
-        # For y=1: p_t = p, for y=0: p_t = 1-p
-        p_t = y_true * p + (1.0 - y_true) * (1.0 - p)
-
-        # Avoid numerical issues
-        p_t = np.clip(p_t, 1e-15, 1.0 - 1e-15)
-        p = np.clip(p, 1e-15, 1.0 - 1e-15)
-
-        # Focal loss: L = -alpha * (1 - p_t)^gamma * log(p_t)
-        # Compute components
-        one_minus_pt = 1.0 - p_t
-        modulating_factor = one_minus_pt ** gamma
-        log_pt = np.log(p_t)
-
-        # Compute gradient: dL/dlogit
-        # Using chain rule: dL/dlogit = dL/dp_t * dp_t/dp * dp/dlogit
-
-        # dp_t/dp = 2*y - 1 (for y=1: dp_t/dp = 1, for y=0: dp_t/dp = -1)
-        dpt_dp = 2.0 * y_true - 1.0
-
-        # dL/dp_t = d/dp_t[-alpha * (1 - p_t)^gamma * log(p_t)]
-        #          = -alpha * [gamma * (1 - p_t)^(gamma-1) * (-1) * log(p_t)
-        #                      + (1 - p_t)^gamma * (1/p_t)]
-        #          = alpha * [gamma * (1 - p_t)^(gamma-1) * log(p_t)
-        #                     - (1 - p_t)^gamma / p_t]
-        one_minus_pt_gamma_minus_1 = one_minus_pt ** (gamma - 1.0) if gamma > 1.0 else np.ones_like(one_minus_pt)
-        dL_dpt = alpha * (
-            gamma * one_minus_pt_gamma_minus_1 * log_pt
-            - modulating_factor / p_t
+    eps = 1e-9
+    def fobj(preds: np.ndarray, train_data: lgb.Dataset):
+        y = train_data.get_label()
+        p = 1.0 / (1.0 + np.exp(-preds))
+        p = np.clip(p, eps, 1 - eps)
+        g = p - y
+        mod = np.abs(y - p) ** gamma
+        grad = scale * alpha * mod * g
+        hess = scale * alpha * mod * p * (1 - p) * (
+            1 + gamma * (1 - 2 * p) * np.log(p / (1 - p))
         )
+        hess = np.clip(hess, 1e-6, None)
+        return grad.astype(np.float64), hess.astype(np.float64)
+    return fobj
 
-        # dL/dp = dL/dp_t * dp_t/dp
-        dL_dp = dL_dpt * dpt_dp
 
-        # dp/dlogit = p * (1 - p) (derivative of sigmoid)
-        dp_dlogit = p * (1.0 - p)
-
-        # dL/dlogit = dL/dp * dp/dlogit
-        grad = dL_dp * dp_dlogit
-
-        # Compute hessian (simplified approximation for stability)
-        # Second derivative approximation
-        hess_factor = np.abs(dL_dp) * (1.0 + gamma * np.maximum(one_minus_pt_gamma_minus_1, 0.1))
-        hess = hess_factor * dp_dlogit
-        hess = np.clip(hess, 1e-7, None)
-
-        return grad, hess
-
-    return objective
 
 
 class LGBMClassifier(BaseClfModel):
@@ -158,6 +106,7 @@ class LGBMClassifier(BaseClfModel):
         self.model: Optional[lgb.Booster] = None
         self.feature_names: Optional[list] = None
         self.best_iteration: int = 0
+        self._used_focal_loss: bool = False
 
     def _compute_pos_weight(self, y: np.ndarray) -> float:
         """Compute pos_weight as (N-P)/P.
@@ -238,10 +187,13 @@ class LGBMClassifier(BaseClfModel):
                 focal_alpha = self._compute_focal_alpha(y)
 
             focal_gamma = self.params.get("focal_gamma", 2.0)
+            focal_scale = self.params.get("focal_scale", 100.0)
             logger.info(f"Using focal loss with alpha={focal_alpha:.4f}, gamma={focal_gamma:.4f}")
 
-            # Create custom objective
-            lgb_params["objective"] = focal_loss_objective(focal_alpha, focal_gamma)
+            # Create custom objective and set it directly in params
+            # LightGBM accepts callable functions in the objective parameter
+            fobj = focal_loss_objective(focal_alpha, focal_gamma, scale=focal_scale)
+            lgb_params["objective"] = fobj
         else:
             # Use standard binary objective with pos_weight
             pos_weight = self.params.get("pos_weight")
@@ -289,16 +241,31 @@ class LGBMClassifier(BaseClfModel):
         if eval_set is not None:
             callbacks.append(lgb.early_stopping(self.params["early_stopping_rounds"]))
 
-        self.model = lgb.train(
-            lgb_params,
-            train_data,
-            num_boost_round=self.params["n_estimators"],
-            valid_sets=valid_sets,
-            valid_names=valid_names,
-            callbacks=callbacks,
-        )
+        train_kwargs = {
+            "params": lgb_params,
+            "train_set": train_data,
+            "num_boost_round": self.params["n_estimators"],
+            "valid_sets": valid_sets,
+            "valid_names": valid_names,
+            "callbacks": callbacks,
+        }
+        if use_focal_loss:
+            # debug
+            grad, hess = fobj(np.zeros_like(y), train_data)
+            print("mean|grad| =", np.mean(np.abs(grad)), "mean hess =", np.mean(hess))
 
-        self.best_iteration = self.model.best_iteration
+        self.model = lgb.train(**train_kwargs)
+
+        # Store whether we used focal loss for predict_proba
+        self._used_focal_loss = use_focal_loss
+
+        # Set best_iteration: use model.best_iteration if available (with early stopping),
+        # otherwise use n_estimators (full training without validation)
+        if eval_set is not None and self.model.best_iteration is not None:
+            self.best_iteration = self.model.best_iteration
+        else:
+            self.best_iteration = self.params["n_estimators"]
+
         logger.info(f"Training completed. Best iteration: {self.best_iteration}")
 
         return self
@@ -320,6 +287,13 @@ class LGBMClassifier(BaseClfModel):
             X = X[self.feature_names]
 
         preds = self.model.predict(X, num_iteration=self.best_iteration)
+
+        # If using custom objective (focal loss), predictions are raw logits
+        # Need to apply sigmoid transformation to get probabilities
+        if self._used_focal_loss:
+            # Apply sigmoid: 1 / (1 + exp(-logit))
+            preds = 1.0 / (1.0 + np.exp(-preds))
+
         return preds
 
     def save(self, path: str) -> None:
@@ -344,6 +318,7 @@ class LGBMClassifier(BaseClfModel):
             "params": self.params,
             "feature_names": self.feature_names,
             "best_iteration": self.best_iteration,
+            "used_focal_loss": self._used_focal_loss,
         }
         metadata_path = path / "metadata.json"
         with open(metadata_path, "w") as f:
@@ -377,6 +352,8 @@ class LGBMClassifier(BaseClfModel):
 
         instance.feature_names = metadata["feature_names"]
         instance.best_iteration = metadata["best_iteration"]
+        # Restore _used_focal_loss from metadata (for backward compatibility, fallback to params)
+        instance._used_focal_loss = metadata.get("used_focal_loss", metadata["params"].get("use_focal_loss", False))
 
         logger.info(f"Loaded model from {path}")
         return instance

@@ -115,7 +115,7 @@ def train_cv(
     config: Config,
     output_dir: str,
     task_name: Optional[str] = None,
-) -> List[Dict[str, float]]:
+) -> tuple[List[Dict[str, float]], List[int], List[int]]:
     """Train models with cross-validation.
 
     Args:
@@ -127,7 +127,7 @@ def train_cv(
         task_name: Task name override (defaults to config.task)
 
     Returns:
-        List of metrics dictionaries per fold
+        Tuple of (fold_metrics, best_iterations, train_sizes)
     """
     # Load features and splits
     features = load_parquet(features_path)
@@ -142,6 +142,8 @@ def train_cv(
 
     # Train each fold
     fold_metrics = []
+    best_iterations = []
+    train_sizes = []
 
     for fold_name, fold_data in splits.items():
         fold_idx = int(fold_name.split("_")[1])
@@ -174,6 +176,8 @@ def train_cv(
         )
 
         fold_metrics.append(metrics)
+        best_iterations.append(model.best_iteration)
+        train_sizes.append(len(X_train))
 
     # Save fold metrics
     metrics_path = output_path / "cv_metrics.csv"
@@ -187,6 +191,90 @@ def train_cv(
         mean_val = np.mean(values)
         std_val = np.std(values)
         logger.info(f"  {metric_name}: {mean_val:.6f} ± {std_val:.6f}")
+
+    avg_best_iter = int(np.mean(best_iterations))
+    logger.info(f"  Average best iteration: {avg_best_iter}")
     logger.info("=" * 50)
 
-    return fold_metrics
+    return fold_metrics, best_iterations, train_sizes
+
+
+def train_full(
+    features_path: str,
+    labels: pd.Series,
+    config: Config,
+    output_dir: str,
+    best_iterations: List[int],
+    train_sizes: List[int],
+    task_name: Optional[str] = None,
+) -> ClfModel:
+    """Train model on full training data.
+
+    Args:
+        features_path: Path to features Parquet
+        labels: Series with labels (indexed by ID)
+        config: Pipeline configuration
+        output_dir: Directory to save model
+        best_iterations: List of best_iteration from CV folds
+        train_sizes: List of training set sizes from CV folds
+        task_name: Task name override (defaults to config.task)
+
+    Returns:
+        Trained model
+    """
+    # Load features
+    features = load_parquet(features_path)
+
+    # Use task_name override if provided, otherwise use config.task
+    actual_task_name = task_name if task_name is not None else config.task
+
+    # Create output directory
+    output_path = Path(output_dir) / actual_task_name / config.model.name
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    # Get full training data
+    # Only use samples that have labels
+    common_ids = features.index.intersection(labels.index)
+    X_full = features.loc[common_ids]
+    y_full = labels.loc[common_ids].values
+
+    logger.info("=" * 50)
+    logger.info("Training on full dataset")
+    logger.info(f"  Full dataset: {len(y_full)} samples, pos={y_full.sum()}")
+
+    # Calculate average best_iteration from CV
+    avg_best_iter = int(np.mean(best_iterations))
+    logger.info(f"  Average best iteration from CV: {avg_best_iter}")
+
+    # Calculate size ratio: full_size / avg_train_size
+    avg_train_size = np.mean(train_sizes)
+    size_ratio = len(X_full) / avg_train_size
+    logger.info(f"  Size ratio (full / avg_train): {size_ratio:.3f}")
+
+    # Adjust n_estimators: int(0.9 * size_ratio * avg_best_iter)
+    adjusted_n_estimators = int(0.9 * size_ratio * avg_best_iter)
+    # Ensure at least avg_best_iter
+    adjusted_n_estimators = max(adjusted_n_estimators, avg_best_iter)
+    logger.info(f"  Adjusted n_estimators: {adjusted_n_estimators}")
+
+    # Create model with adjusted n_estimators
+    model = create_model(config)
+    # Override n_estimators for full training
+    original_n_estimators = model.params["n_estimators"]
+    model.params["n_estimators"] = adjusted_n_estimators
+
+    # Train on full data (no validation set, no early stopping)
+    logger.info(f"Training with {adjusted_n_estimators} rounds (no early stopping)")
+    model.fit(X_full, y_full, eval_set=None)
+
+    # Save full model
+    full_model_dir = output_path / "full_model"
+    model.save(str(full_model_dir))
+
+    logger.info(f"Saved full model to {full_model_dir}")
+    logger.info("=" * 50)
+
+    # Restore original n_estimators (for metadata consistency)
+    model.params["n_estimators"] = original_n_estimators
+
+    return model

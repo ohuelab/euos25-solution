@@ -113,8 +113,9 @@ def predict_test(
     output_path: str,
     task_name: Optional[str] = None,
     average: bool = True,
+    use_full_model: bool = True,
 ) -> pd.DataFrame:
-    """Generate test predictions by averaging across folds.
+    """Generate test predictions by averaging across folds or using full model.
 
     Args:
         features_path: Path to test features Parquet
@@ -122,7 +123,8 @@ def predict_test(
         config: Pipeline configuration
         output_path: Path to save predictions
         task_name: Task name override (defaults to config.task)
-        average: Whether to average predictions across folds
+        average: Whether to average predictions across folds (ignored if use_full_model=True)
+        use_full_model: If True, use full model trained on all data; otherwise use fold ensemble
 
     Returns:
         DataFrame with test predictions
@@ -136,41 +138,57 @@ def predict_test(
     # Load models directory
     models_path = Path(model_dir) / actual_task_name / config.model.name
 
-    # Find all fold models
-    fold_dirs = sorted(models_path.glob("fold_*"))
-    logger.info(f"Found {len(fold_dirs)} fold models")
+    # Try to use full model if requested
+    full_model_path = models_path / "full_model"
+    if use_full_model and full_model_path.exists():
+        logger.info("Using full model trained on all data")
+        model = load_fold_model(full_model_path, config)
+        predictions = model.predict_proba(features)
 
-    # Generate predictions for each fold
-    all_predictions = []
-
-    for fold_dir in fold_dirs:
-        fold_idx = int(fold_dir.name.split("_")[1])
-        logger.info(f"Predicting with fold {fold_idx} model")
-
-        # Load model
-        model = load_fold_model(fold_dir, config)
-
-        # Predict
-        preds = model.predict_proba(features)
-        all_predictions.append(preds)
-
-    # Average or stack predictions
-    if average:
-        predictions = np.mean(all_predictions, axis=0)
-    else:
-        predictions = np.array(all_predictions)
-
-    # Create DataFrame
-    if average:
         pred_df = pd.DataFrame({
             "mol_id": features.index,
             "prediction": predictions,
         })
     else:
-        pred_df = pd.DataFrame({
-            "mol_id": features.index,
-            **{f"fold_{i}": preds for i, preds in enumerate(all_predictions)}
-        })
+        # Fall back to fold ensemble
+        if use_full_model:
+            logger.warning(f"Full model not found at {full_model_path}, using fold ensemble")
+
+        # Find all fold models
+        fold_dirs = sorted(models_path.glob("fold_*"))
+        logger.info(f"Found {len(fold_dirs)} fold models")
+
+        # Generate predictions for each fold
+        all_predictions = []
+
+        for fold_dir in fold_dirs:
+            fold_idx = int(fold_dir.name.split("_")[1])
+            logger.info(f"Predicting with fold {fold_idx} model")
+
+            # Load model
+            model = load_fold_model(fold_dir, config)
+
+            # Predict
+            preds = model.predict_proba(features)
+            all_predictions.append(preds)
+
+        # Average or stack predictions
+        if average:
+            predictions = np.mean(all_predictions, axis=0)
+        else:
+            predictions = np.array(all_predictions)
+
+        # Create DataFrame
+        if average:
+            pred_df = pd.DataFrame({
+                "mol_id": features.index,
+                "prediction": predictions,
+            })
+        else:
+            pred_df = pd.DataFrame({
+                "mol_id": features.index,
+                **{f"fold_{i}": preds for i, preds in enumerate(all_predictions)}
+            })
 
     # Save predictions
     save_csv(pred_df, output_path, index=False)

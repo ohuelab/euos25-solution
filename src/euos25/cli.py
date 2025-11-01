@@ -14,7 +14,7 @@ from euos25.pipeline.features import build_features_from_config
 from euos25.pipeline.infer import predict_oof, predict_test
 from euos25.pipeline.prepare import prepare_data
 from euos25.pipeline.submit import create_submission, create_final_submission, generate_timestamped_submission
-from euos25.pipeline.train import train_cv
+from euos25.pipeline.train import train_cv, train_full
 from euos25.utils.io import load_csv, save_json
 from euos25.utils.seed import set_seed
 
@@ -136,12 +136,24 @@ def train(features, splits, config, outdir, label_col, data, task):
     labels = df.set_index("ID")[label_col]
 
     # Train with CV
-    fold_metrics = train_cv(
+    fold_metrics, best_iterations, train_sizes = train_cv(
         features_path=features,
         splits_path=splits,
         labels=labels,
         config=cfg,
         output_dir=outdir,
+        task_name=task_name,
+    )
+
+    # Train on full dataset
+    logger.info("Training on full dataset")
+    train_full(
+        features_path=features,
+        labels=labels,
+        config=cfg,
+        output_dir=outdir,
+        best_iterations=best_iterations,
+        train_sizes=train_sizes,
         task_name=task_name,
     )
 
