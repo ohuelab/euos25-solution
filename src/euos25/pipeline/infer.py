@@ -36,6 +36,7 @@ def predict_oof(
     model_dir: str,
     config: Config,
     output_path: str,
+    task_name: Optional[str] = None,
 ) -> pd.DataFrame:
     """Generate out-of-fold predictions.
 
@@ -45,6 +46,7 @@ def predict_oof(
         model_dir: Directory containing trained models
         config: Pipeline configuration
         output_path: Path to save predictions
+        task_name: Task name override (defaults to config.task)
 
     Returns:
         DataFrame with OOF predictions
@@ -57,8 +59,11 @@ def predict_oof(
     predictions = np.zeros(len(features))
     prediction_counts = np.zeros(len(features))
 
+    # Use task_name override if provided, otherwise use config.task
+    actual_task_name = task_name if task_name is not None else config.task
+
     # Load models directory
-    models_path = Path(model_dir) / config.task / config.model.name
+    models_path = Path(model_dir) / actual_task_name / config.model.name
 
     # Generate predictions for each fold
     for fold_name, fold_data in splits.items():
@@ -106,6 +111,7 @@ def predict_test(
     model_dir: str,
     config: Config,
     output_path: str,
+    task_name: Optional[str] = None,
     average: bool = True,
 ) -> pd.DataFrame:
     """Generate test predictions by averaging across folds.
@@ -115,6 +121,7 @@ def predict_test(
         model_dir: Directory containing trained models
         config: Pipeline configuration
         output_path: Path to save predictions
+        task_name: Task name override (defaults to config.task)
         average: Whether to average predictions across folds
 
     Returns:
@@ -123,8 +130,11 @@ def predict_test(
     # Load features
     features = load_parquet(features_path)
 
+    # Use task_name override if provided, otherwise use config.task
+    actual_task_name = task_name if task_name is not None else config.task
+
     # Load models directory
-    models_path = Path(model_dir) / config.task / config.model.name
+    models_path = Path(model_dir) / actual_task_name / config.model.name
 
     # Find all fold models
     fold_dirs = sorted(models_path.glob("fold_*"))

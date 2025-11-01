@@ -74,6 +74,7 @@ fi
 
 # Step 2: Process each task independently
 TASKS=("fluo_340_450" "fluo_480" "trans_340" "trans_450")
+TASK_NAMES=("y_fluo_any" "y_fluo_any" "y_trans_any" "y_trans_any")
 TRAIN_FILES=("$RAW_TRAIN_FLUO_340_450" "$RAW_TRAIN_FLUO_480" "$RAW_TRAIN_TRANS_340" "$RAW_TRAIN_TRANS_450")
 PREPARED_FILES=("$PREPARED_TRAIN_FLUO_340_450" "$PREPARED_TRAIN_FLUO_480" "$PREPARED_TRAIN_TRANS_340" "$PREPARED_TRAIN_TRANS_450")
 FEATURE_FILES=("$FEATURES_TRAIN_FLUO_340_450" "$FEATURES_TRAIN_FLUO_480" "$FEATURES_TRAIN_TRANS_340" "$FEATURES_TRAIN_TRANS_450")
@@ -82,6 +83,7 @@ LABEL_COLS=("Fluorescence" "Fluorescence" "Transmittance" "Transmittance")
 
 for i in "${!TASKS[@]}"; do
   TASK="${TASKS[$i]}"
+  TASK_NAME="${TASK_NAMES[$i]}"
   TRAIN_FILE="${TRAIN_FILES[$i]}"
   PREPARED_FILE="${PREPARED_FILES[$i]}"
   FEATURE_FILE="${FEATURE_FILES[$i]}"
@@ -90,7 +92,7 @@ for i in "${!TASKS[@]}"; do
 
   echo ""
   echo "==================================="
-  echo "Processing task: $TASK"
+  echo "Processing task: $TASK (task_name: $TASK_NAME)"
   echo "==================================="
 
   # Prepare training data
@@ -136,11 +138,6 @@ for i in "${!TASKS[@]}"; do
   echo ""
   echo "Step 2d: Training models for $TASK..."
 
-  # Task name is determined by config.task in the YAML file (currently y_fluo_any for all tasks)
-  # We need to check the actual directory that will be created by the train command
-  # The train command uses config.task, which is set to y_fluo_any in full.yaml
-  TASK_NAME="y_fluo_any"
-
   # Check if at least one model file exists
   MODEL_EXISTS=false
   if [ -f "$MODEL_DIR/$TASK/$TASK_NAME/lgbm/fold_0/model.txt" ]; then
@@ -154,7 +151,8 @@ for i in "${!TASKS[@]}"; do
       --config $CONF \
       --outdir "$MODEL_DIR/$TASK" \
       --data "$PREPARED_FILE" \
-      --label-col "$LABEL_COL"
+      --label-col "$LABEL_COL" \
+      --task "$TASK_NAME"
   else
     echo "  Skipping: Models in $MODEL_DIR/$TASK/$TASK_NAME already exist"
   fi
@@ -195,13 +193,11 @@ echo ""
 echo "Step 4: Generating test predictions..."
 for i in "${!TASKS[@]}"; do
   TASK="${TASKS[$i]}"
+  TASK_NAME="${TASK_NAMES[$i]}"
   SPLIT_FILE="${SPLIT_FILES[$i]}"
 
   echo ""
   echo "Step 4a: Generating test predictions for $TASK..."
-
-  # Task name is determined by config.task in the YAML file (currently y_fluo_any for all tasks)
-  TASK_NAME="y_fluo_any"
 
   TEST_OUTPUT="$PRED_DIR/$TASK/${TASK_NAME}_test.csv"
   if [ "$FORCE" = true ] || [ ! -f "$TEST_OUTPUT" ]; then
@@ -223,17 +219,17 @@ echo ""
 echo "Step 5: Creating submissions..."
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
-for TASK in "${TASKS[@]}"; do
+for i in "${!TASKS[@]}"; do
+  TASK="${TASKS[$i]}"
+  TASK_NAME="${TASK_NAMES[$i]}"
+
   echo ""
   echo "Step 5a: Creating submission for $TASK..."
-
-  # Output column name is determined by config.task in the YAML file (currently y_fluo_any for all tasks)
-  OUTPUT_COL="y_fluo_any"
 
   SUBMISSION_FILE="$SUBMISSION_DIR/${TASK}_${TIMESTAMP}.csv"
   # Submissions are always created with timestamp, so we don't skip them
   # But we can check if the input prediction file exists
-  PRED_INPUT="$PRED_DIR/$TASK/${OUTPUT_COL}_test.csv"
+  PRED_INPUT="$PRED_DIR/$TASK/${TASK_NAME}_test.csv"
   if [ ! -f "$PRED_INPUT" ]; then
     echo "  Warning: Prediction file $PRED_INPUT not found, skipping submission"
     continue
@@ -247,7 +243,7 @@ done
 # Step 6: Create final submission combining all tasks
 echo ""
 echo "Step 6: Creating final submission by combining all tasks..."
-FINAL_SUBMISSION_FILE="$SUBMISSION_DIR/final_submission_${TIMESTAMP}.csv"
+FINAL_SUBMISSION_FILE="$SUBMISSION_DIR/submission_${TIMESTAMP}.csv"
 
 # Check if all individual submission files exist
 ALL_FILES_EXIST=true
@@ -270,7 +266,7 @@ if [ "$ALL_FILES_EXIST" = true ]; then
     --fluo-480 "$FLUO_480_FILE" \
     --fluo-340-450 "$FLUO_340_450_FILE" \
     --out "$FINAL_SUBMISSION_FILE"
-  echo "  Created: final_submission_${TIMESTAMP}.csv"
+  echo "  Created: submission_${TIMESTAMP}.csv"
 else
   echo "  Warning: Could not create final submission due to missing files"
 fi
@@ -288,6 +284,6 @@ for TASK in "${TASKS[@]}"; do
   echo "  - ${TASK}_${TIMESTAMP}.csv"
 done
 if [ "$ALL_FILES_EXIST" = true ]; then
-  echo "  - final_submission_${TIMESTAMP}.csv (FINAL)"
+  echo "  - submission_${TIMESTAMP}.csv (FINAL)"
 fi
 echo ""

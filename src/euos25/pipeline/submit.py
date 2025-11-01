@@ -105,11 +105,15 @@ def create_final_submission(
     The final submission should have the format:
     Transmittance(340),Transmittance(450),Fluorescence(340/480),Fluorescence(multiple)
 
+    Note on fluorescence mapping:
+    - Fluorescence(340/480): corresponds to fluo_340_450 (340/450 nm fluorescence)
+    - Fluorescence(multiple): corresponds to fluo_480 (Subtask 2b: 480/540, 525/598, or 560/610 nm)
+
     Args:
         trans_340_path: Path to trans_340 submission CSV (ID, prediction)
         trans_450_path: Path to trans_450 submission CSV (ID, prediction)
-        fluo_480_path: Path to fluo_480 submission CSV (ID, prediction)
-        fluo_340_450_path: Path to fluo_340_450 submission CSV (ID, prediction)
+        fluo_480_path: Path to fluo_480 submission CSV (ID, prediction) - maps to Fluorescence(multiple)
+        fluo_340_450_path: Path to fluo_340_450 submission CSV (ID, prediction) - maps to Fluorescence(340/480)
         output_path: Path to save final submission CSV
 
     Returns:
@@ -151,11 +155,13 @@ def create_final_submission(
         raise ValueError("trans_340 and fluo_340_450 have different IDs")
 
     # Create final submission
+    # Note: Fluorescence(340/480) corresponds to fluo_340_450 (340/450 nm fluorescence)
+    #       Fluorescence(multiple) corresponds to fluo_480 (Subtask 2b: 480/540, 525/598, 560/610 nm)
     final_submission = pd.DataFrame({
         "Transmittance(340)": trans_340_df["prediction"].clip(0, 1),
         "Transmittance(450)": trans_450_df["prediction"].clip(0, 1),
-        "Fluorescence(340/480)": fluo_480_df["prediction"].clip(0, 1),
-        "Fluorescence(multiple)": fluo_340_450_df["prediction"].clip(0, 1),
+        "Fluorescence(340/480)": fluo_340_450_df["prediction"].clip(0, 1),
+        "Fluorescence(multiple)": fluo_480_df["prediction"].clip(0, 1),
     })
 
     # Save submission

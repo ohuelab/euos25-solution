@@ -97,12 +97,16 @@ def build_features(input, output, config):
 @click.option("--outdir", required=True, help="Output directory for models")
 @click.option("--label-col", default=None, help="Label column name")
 @click.option("--data", default=None, help="Data CSV file with labels")
-def train(features, splits, config, outdir, label_col, data):
+@click.option("--task", default=None, help="Task name override (e.g., 'y_fluo_any', 'y_trans_any')")
+def train(features, splits, config, outdir, label_col, data, task):
     """Train models with cross-validation."""
     logger.info("Training models")
 
     # Load config
     cfg = load_config(config)
+
+    # Override task name if provided
+    task_name = task if task is not None else cfg.task
 
     # Set seed
     set_seed(cfg.seed)
@@ -117,12 +121,14 @@ def train(features, splits, config, outdir, label_col, data):
 
     # Get label column
     if label_col is None:
-        # Infer from config task name
+        # Infer from task name
         task_to_col = {
-            "y_abs_340": "Transmittance",  # Example mapping
+            "y_abs_340": "Transmittance",
+            "y_trans_any": "Transmittance",
             "y_fluo_any": "Fluorescence",
+            "y_fluo_340_450": "Fluorescence",
         }
-        label_col = task_to_col.get(cfg.task, "Fluorescence")
+        label_col = task_to_col.get(task_name, "Fluorescence")
 
     if label_col not in df.columns:
         raise ValueError(f"Label column {label_col} not found")
@@ -136,6 +142,7 @@ def train(features, splits, config, outdir, label_col, data):
         labels=labels,
         config=cfg,
         output_dir=outdir,
+        task_name=task_name,
     )
 
     logger.info("Training completed")
@@ -173,6 +180,7 @@ def infer(features, splits, config, model_dir, outdir, mode, task):
             model_dir=model_dir,
             config=cfg,
             output_path=str(output_path),
+            task_name=task_name,
         )
     elif mode == "test":
         output_path = Path(outdir) / f"{task_name}_test.csv"
@@ -181,6 +189,7 @@ def infer(features, splits, config, model_dir, outdir, mode, task):
             model_dir=model_dir,
             config=cfg,
             output_path=str(output_path),
+            task_name=task_name,
         )
     else:
         raise ValueError(f"Unknown mode: {mode}")

@@ -105,6 +105,7 @@ def train_cv(
     labels: pd.Series,
     config: Config,
     output_dir: str,
+    task_name: Optional[str] = None,
 ) -> List[Dict[str, float]]:
     """Train models with cross-validation.
 
@@ -114,6 +115,7 @@ def train_cv(
         labels: Series with labels (indexed by ID)
         config: Pipeline configuration
         output_dir: Directory to save models and metrics
+        task_name: Task name override (defaults to config.task)
 
     Returns:
         List of metrics dictionaries per fold
@@ -122,8 +124,11 @@ def train_cv(
     features = load_parquet(features_path)
     splits = load_json(splits_path)
 
+    # Use task_name override if provided, otherwise use config.task
+    actual_task_name = task_name if task_name is not None else config.task
+
     # Create output directory
-    output_path = Path(output_dir) / config.task / config.model.name
+    output_path = Path(output_dir) / actual_task_name / config.model.name
     output_path.mkdir(parents=True, exist_ok=True)
 
     # Train each fold
