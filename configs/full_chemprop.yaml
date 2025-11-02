@@ -1,0 +1,49 @@
+# Full ChemProp configuration for production training
+# Uses standard MPNN without foundation model
+
+seed: 42
+folds: 5
+scaffold_min_size: 10
+
+# Task configuration
+task: "transmittance340"
+metrics:
+  - "roc_auc"
+  - "pr_auc"
+
+# Model configuration
+model:
+  name: "chemprop"
+  params:
+    max_epochs: 50
+    batch_size: 64
+    learning_rate: 0.001
+    hidden_size: 300
+    depth: 3
+    dropout: 0.1
+    aggregation: "mean"
+    batch_norm: true
+    ffn_num_layers: 2
+    use_foundation: false
+    checkpoint_dir: "outputs/full_chemprop/checkpoints"
+
+# No featurizers needed for ChemProp
+featurizers: []
+
+# Imbalance handling
+imbalance:
+  use_pos_weight: false
+  pos_weight_from_data: false
+  use_sampling: false
+  use_focal_loss: false
+
+# Optuna (can be enabled for hyperparameter tuning)
+optuna:
+  enable: false
+
+# Early stopping
+early_stopping_rounds: 10
+early_stopping_metric: "roc_auc"
+
+# Logging
+log_level: "INFO"
