@@ -50,16 +50,33 @@ def load_multitask_labels(
         file_path = data_dir / task_to_file[task_name]
         df = pd.read_csv(file_path)
 
-        # Column names vary by file, but typically "Transmittance (qualitative)" or similar
-        if "Transmittance (qualitative)" in df.columns:
-            label_col = "Transmittance (qualitative)"
-        elif "Fluorescence (qualitative)" in df.columns:
-            label_col = "Fluorescence (qualitative)"
-        else:
-            raise ValueError(f"Cannot find label column in {file_path}")
+        # Column names vary by file - handle different naming conventions
+        # Check for label column (in order of preference)
+        label_col = None
+        for possible_label in [
+            "Transmittance (qualitative)",
+            "Transmittance",
+            "Fluorescence (qualitative)",
+            "Fluorescence",
+        ]:
+            if possible_label in df.columns:
+                label_col = possible_label
+                break
 
-        # Set index to N (sample ID)
-        df = df.set_index("N")
+        if label_col is None:
+            raise ValueError(f"Cannot find label column in {file_path}. Available columns: {df.columns.tolist()}")
+
+        # ID column can be either "N" or "ID"
+        id_col = None
+        if "N" in df.columns:
+            id_col = "N"
+        elif "ID" in df.columns:
+            id_col = "ID"
+        else:
+            raise ValueError(f"Cannot find ID column in {file_path}. Available columns: {df.columns.tolist()}")
+
+        # Set index to ID column
+        df = df.set_index(id_col)
 
         # Get labels
         labels = df[label_col].rename(task_name)
