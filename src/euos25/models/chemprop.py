@@ -9,7 +9,7 @@ import pandas as pd
 import torch
 from chemprop import data, featurizers, models, nn
 from lightning import pytorch as pl
-from lightning.pytorch.callbacks import ModelCheckpoint
+from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 
 from euos25.models.base import BaseClfModel
 
@@ -42,6 +42,8 @@ class ChemPropModel(BaseClfModel):
         checkpoint_dir: Optional[str] = None,
         random_seed: int = 42,
         accelerator: Optional[str] = None,
+        early_stopping_rounds: Optional[int] = None,
+        early_stopping_metric: str = "roc_auc",
         **kwargs,
     ):
         """Initialize ChemProp model.
@@ -66,6 +68,9 @@ class ChemPropModel(BaseClfModel):
             accelerator: Accelerator to use ('auto', 'cpu', 'cuda', 'mps').
                         If None or 'auto', automatically selects based on availability.
                         On macOS, 'auto' will select 'mps' if available, else 'cpu'.
+            early_stopping_rounds: Number of epochs to wait before early stopping (patience).
+                                  If None, early stopping is disabled.
+            early_stopping_metric: Metric to monitor for early stopping ('roc_auc', 'pr_auc', etc.)
             **kwargs: Additional parameters
         """
         super().__init__(name="chemprop", **kwargs)
@@ -85,6 +90,8 @@ class ChemPropModel(BaseClfModel):
         self.focal_gamma = focal_gamma
         self.checkpoint_dir = checkpoint_dir or "checkpoints/chemprop"
         self.random_seed = random_seed
+        self.early_stopping_rounds = early_stopping_rounds
+        self.early_stopping_metric = early_stopping_metric
 
         # Determine accelerator
         if accelerator is None or accelerator == "auto":
@@ -285,22 +292,67 @@ class ChemPropModel(BaseClfModel):
         # Build model
         self.model = self._build_model()
 
+        # Map early_stopping_metric to PyTorch Lightning metric name
+        metric_name_map = {
+            "roc_auc": "val_AUROC",
+            "pr_auc": "val_AUPRC",  # Assuming PR-AUC is logged as AUPRC
+        }
+        monitor_metric = metric_name_map.get(
+            self.early_stopping_metric.lower(), "val_loss"
+        )
+
         # Setup checkpointing
+        # Include task and fold info in filename if available from checkpoint_dir path
+        checkpoint_path = Path(self.checkpoint_dir)
+        # Extract task and fold/full from path if available (e.g., .../task_name/fold_0/... or .../task_name/full/...)
+        task_fold_suffix = ""
+        last_part = checkpoint_path.parts[-1] if checkpoint_path.parts else ""
+        if "fold_" in last_part or last_part == "full":
+            task_fold_suffix = f"-{last_part}"
+            if len(checkpoint_path.parts) > 1:
+                task_name = checkpoint_path.parts[-2]
+                task_fold_suffix = f"-{task_name}{task_fold_suffix}"
+
         checkpoint_callback = ModelCheckpoint(
             dirpath=self.checkpoint_dir,
-            filename="best-{epoch}-{val_loss:.4f}",
+            filename=f"best{task_fold_suffix}-{{epoch}}-{{val_loss:.4f}}",
             monitor="val_loss" if val_loader else "train_loss",
             mode="min",
             save_last=True,
             save_top_k=1,
         )
 
+        # Setup callbacks
+        callbacks = [checkpoint_callback]
+
+        # Setup early stopping if enabled
+        if (
+            self.early_stopping_rounds is not None
+            and self.early_stopping_rounds > 0
+            and val_loader is not None
+        ):
+            # Determine mode: 'max' for metrics to maximize (AUC), 'min' for loss
+            early_stopping_mode = (
+                "max" if self.early_stopping_metric.lower() in ["roc_auc", "pr_auc"] else "min"
+            )
+            early_stopping_callback = EarlyStopping(
+                monitor=monitor_metric,
+                patience=self.early_stopping_rounds,
+                mode=early_stopping_mode,
+                verbose=True,
+            )
+            callbacks.append(early_stopping_callback)
+            logger.info(
+                f"Early stopping enabled: patience={self.early_stopping_rounds}, "
+                f"monitor={monitor_metric}, mode={early_stopping_mode}"
+            )
+
         # Setup trainer
         self.trainer = pl.Trainer(
             max_epochs=self.max_epochs,
             accelerator=self.accelerator,
             devices=1,
-            callbacks=[checkpoint_callback],
+            callbacks=callbacks,
             enable_progress_bar=True,
             logger=False,
         )

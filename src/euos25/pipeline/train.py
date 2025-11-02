@@ -17,11 +17,12 @@ from euos25.utils.metrics import calc_metrics, save_fold_metrics
 logger = logging.getLogger(__name__)
 
 
-def create_model(config: Config) -> ClfModel:
+def create_model(config: Config, checkpoint_dir: Optional[str] = None) -> ClfModel:
     """Create model from configuration.
 
     Args:
         config: Pipeline configuration
+        checkpoint_dir: Optional checkpoint directory override (for ChemProp)
 
     Returns:
         Model instance
@@ -73,9 +74,13 @@ def create_model(config: Config) -> ClfModel:
         # Add random_seed from config
         model_params["random_seed"] = config.seed
 
-        # Early stopping for ChemProp is handled internally via PyTorch Lightning
-        # Remove early_stopping_rounds from params as it's not used by ChemProp
-        model_params.pop("early_stopping_rounds", None)
+        # Add early stopping parameters for ChemProp
+        model_params["early_stopping_rounds"] = config.early_stopping_rounds
+        model_params["early_stopping_metric"] = config.early_stopping_metric
+
+        # Override checkpoint_dir if provided
+        if checkpoint_dir is not None:
+            model_params["checkpoint_dir"] = checkpoint_dir
 
         return ChemPropModel(**model_params)
     else:
@@ -90,6 +95,7 @@ def train_fold(
     config: Config,
     fold_idx: int,
     output_dir: Optional[Path] = None,
+    task_name: Optional[str] = None,
 ) -> tuple[ClfModel, Dict[str, float]]:
     """Train model on single fold.
 
@@ -101,6 +107,7 @@ def train_fold(
         config: Pipeline configuration
         fold_idx: Fold index
         output_dir: Directory to save model (optional)
+        task_name: Task name for checkpoint directory (optional)
 
     Returns:
         Tuple of (trained_model, metrics_dict)
@@ -109,8 +116,21 @@ def train_fold(
     logger.info(f"  Train: {len(y_train)} samples, pos={y_train.sum()}")
     logger.info(f"  Valid: {len(y_valid)} samples, pos={y_valid.sum()}")
 
+    # Build checkpoint directory for ChemProp with task name and fold number
+    checkpoint_dir = None
+    if config.model.name == "chemprop" and output_dir is not None:
+        actual_task_name = task_name if task_name is not None else config.task
+        # Use checkpoint_dir from config if specified, otherwise construct from output_dir
+        base_checkpoint_dir = config.model.params.get("checkpoint_dir")
+        if base_checkpoint_dir:
+            checkpoint_dir = str(Path(base_checkpoint_dir) / actual_task_name / f"fold_{fold_idx}")
+        else:
+            checkpoint_dir = str(output_dir / "checkpoints" / f"fold_{fold_idx}")
+        # Ensure directory exists
+        Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
+
     # Create model
-    model = create_model(config)
+    model = create_model(config, checkpoint_dir=checkpoint_dir)
 
     # Train model - handle different model signatures
     if config.model.name == "chemprop":
@@ -207,6 +227,7 @@ def train_cv(
             config,
             fold_idx,
             output_dir=output_path,
+            task_name=actual_task_name,
         )
 
         fold_metrics.append(metrics)
@@ -276,8 +297,20 @@ def train_full(
     logger.info("Training on full dataset")
     logger.info(f"  Full dataset: {len(y_full)} samples, pos={y_full.sum()}")
 
+    # Build checkpoint directory for ChemProp with task name and "full" suffix
+    checkpoint_dir = None
+    if config.model.name == "chemprop":
+        # Use checkpoint_dir from config if specified, otherwise construct from output_dir
+        base_checkpoint_dir = config.model.params.get("checkpoint_dir")
+        if base_checkpoint_dir:
+            checkpoint_dir = str(Path(base_checkpoint_dir) / actual_task_name / "full")
+        else:
+            checkpoint_dir = str(output_path / "checkpoints" / "full")
+        # Ensure directory exists
+        Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
+
     # Create model
-    model = create_model(config)
+    model = create_model(config, checkpoint_dir=checkpoint_dir)
 
     # Handle model-specific full training adjustments
     if config.model.name == "lgbm":

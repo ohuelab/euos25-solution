@@ -158,8 +158,9 @@ class ChemeleonFeaturizer(BaseFeaturizer):
 
         with torch.no_grad():
             for batch in dataloader:
-                # Move batch to device
-                bmg = batch.bmg.to(self.device)
+                # Move batch to device (to() modifies in-place and returns None)
+                batch.bmg.to(self.device)
+                bmg = batch.bmg
 
                 # Get message passing output
                 H_v = self.mp(bmg)
