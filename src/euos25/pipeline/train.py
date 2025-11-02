@@ -147,8 +147,16 @@ def train_fold(
     # Predict on validation
     y_pred = model.predict_proba(X_valid)
 
+    # Handle different output shapes: chemprop returns (n_samples, 2), lgbm returns (n_samples,)
+    if config.model.name == "chemprop" and y_pred.ndim == 2:
+        # Extract positive class probabilities for metrics calculation
+        y_pred_proba = y_pred[:, 1]
+    else:
+        # LGBM and other models return 1D array directly
+        y_pred_proba = y_pred
+
     # Calculate metrics
-    metrics = calc_metrics(y_valid, y_pred, metrics=config.metrics)
+    metrics = calc_metrics(y_valid, y_pred_proba, metrics=config.metrics)
 
     # Log metrics
     for metric_name, score in metrics.items():
@@ -343,7 +351,8 @@ def train_full(
         # For ChemProp, use max_epochs from config (no adjustment needed)
         logger.info(f"  Training with max_epochs={model.params.get('max_epochs', 'default')}")
         logger.info("  Training on full data (no validation set)")
-        model.fit(X_full, y_full, eval_set=None)
+        # ChemProp uses X_val and y_val instead of eval_set
+        model.fit(X_full, y_full, X_val=None, y_val=None)
     else:
         # Generic fallback
         logger.info("  Training on full data (no validation set)")

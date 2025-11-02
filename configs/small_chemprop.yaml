@@ -16,7 +16,7 @@ model:
   name: "chemprop"
   params:
     max_epochs: 10
-    batch_size: 32
+    batch_size: 2048
     learning_rate: 0.001
     hidden_size: 300
     depth: 3
@@ -42,7 +42,7 @@ optuna:
   enable: false
 
 # Early stopping
-early_stopping_rounds: 50
+early_stopping_rounds: 1
 early_stopping_metric: "roc_auc"
 
 # Logging
