@@ -116,6 +116,44 @@ def train_fold(
     logger.info(f"  Train: {len(y_train)} samples, pos={y_train.sum()}")
     logger.info(f"  Valid: {len(y_valid)} samples, pos={y_valid.sum()}")
 
+    # Check if model already exists
+    if output_dir:
+        model_dir = output_dir / f"fold_{fold_idx}"
+        if config.model.name == "lgbm":
+            model_path = model_dir / "model.txt"
+            if model_path.exists():
+                logger.info(f"  Model already exists at {model_dir}, skipping training")
+                from euos25.models.lgbm import LGBMClassifier
+                model = LGBMClassifier.load(str(model_dir))
+                # Predict on validation to compute metrics
+                y_pred = model.predict_proba(X_valid)
+                y_pred_proba = y_pred
+                metrics = calc_metrics(y_valid, y_pred_proba, metrics=config.metrics)
+                for metric_name, score in metrics.items():
+                    logger.info(f"  {metric_name}: {score:.6f}")
+                return model, metrics
+        elif config.model.name == "chemprop":
+            # For ChemProp, check if model exists (can be file or directory)
+            # trainer.save_checkpoint() saves as a file
+            if model_dir.exists() and (model_dir.is_file() or model_dir.is_dir()):
+                logger.info(f"  Model already exists at {model_dir}, skipping training")
+                from euos25.models.chemprop import ChemPropModel
+                # Load model parameters from config to reconstruct
+                model = ChemPropModel.load_from_checkpoint(
+                    str(model_dir),
+                    **config.model.params,
+                    random_seed=config.seed,
+                    early_stopping_rounds=config.early_stopping_rounds,
+                    early_stopping_metric=config.early_stopping_metric,
+                )
+                # Predict on validation to compute metrics
+                y_pred = model.predict_proba(X_valid)
+                y_pred_proba = y_pred[:, 1] if y_pred.ndim == 2 else y_pred
+                metrics = calc_metrics(y_valid, y_pred_proba, metrics=config.metrics)
+                for metric_name, score in metrics.items():
+                    logger.info(f"  {metric_name}: {score:.6f}")
+                return model, metrics
+
     # Build checkpoint directory for ChemProp with task name and fold number
     checkpoint_dir = None
     if config.model.name == "chemprop" and output_dir is not None:
@@ -294,6 +332,34 @@ def train_full(
     # Create output directory
     output_path = Path(output_dir) / actual_task_name / config.model.name
     output_path.mkdir(parents=True, exist_ok=True)
+
+    # Check if full model already exists
+    full_model_dir = output_path / "full_model"
+    if config.model.name == "lgbm":
+        model_path = full_model_dir / "model.txt"
+        if model_path.exists():
+            logger.info("=" * 50)
+            logger.info("Full model already exists, skipping training")
+            logger.info(f"  Model path: {full_model_dir}")
+            logger.info("=" * 50)
+            from euos25.models.lgbm import LGBMClassifier
+            return LGBMClassifier.load(str(full_model_dir))
+    elif config.model.name == "chemprop":
+        # For ChemProp, check if model exists (can be file or directory)
+        if full_model_dir.exists() and (full_model_dir.is_file() or full_model_dir.is_dir()):
+            logger.info("=" * 50)
+            logger.info("Full model already exists, skipping training")
+            logger.info(f"  Model path: {full_model_dir}")
+            logger.info("=" * 50)
+            from euos25.models.chemprop import ChemPropModel
+            model = ChemPropModel.load_from_checkpoint(
+                str(full_model_dir),
+                **config.model.params,
+                random_seed=config.seed,
+                early_stopping_rounds=config.early_stopping_rounds,
+                early_stopping_metric=config.early_stopping_metric,
+            )
+            return model
 
     # Get full training data
     # Only use samples that have labels

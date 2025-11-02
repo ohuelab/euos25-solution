@@ -532,3 +532,107 @@ class ChemPropModel(BaseClfModel):
             "ChemProp model loading not fully implemented. "
             "Use trainer.save_checkpoint() and models.MPNN.load_from_checkpoint()"
         )
+
+    @classmethod
+    def load_from_checkpoint(
+        cls,
+        checkpoint_path: str,
+        **override_params,
+    ) -> "ChemPropModel":
+        """Load ChemPropModel from checkpoint.
+
+        Args:
+            checkpoint_path: Path to checkpoint file or directory containing checkpoint
+            **override_params: Parameters to override from checkpoint
+
+        Returns:
+            Loaded ChemPropModel instance
+        """
+        checkpoint_path = Path(checkpoint_path)
+
+        # If checkpoint_path is a directory, look for checkpoint files
+        if checkpoint_path.is_dir():
+            # Look for .ckpt files in the directory
+            ckpt_files = list(checkpoint_path.glob("*.ckpt"))
+            if ckpt_files:
+                # Prefer best checkpoint if available, otherwise use last
+                best_ckpt = [f for f in ckpt_files if "best" in f.name]
+                if best_ckpt:
+                    checkpoint_path = sorted(best_ckpt)[-1]
+                else:
+                    checkpoint_path = sorted(ckpt_files)[-1]
+            else:
+                raise FileNotFoundError(
+                    f"No checkpoint files found in directory {checkpoint_path}"
+                )
+        elif not checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+        # Try to load hyperparameters from checkpoint
+        # For newer PyTorch Lightning checkpoints (ZIP format), we need to use Lightning's load_from_checkpoint
+        # For older checkpoints, we might be able to read metadata
+        hparams = {}
+        if checkpoint_path.suffix == ".ckpt" or checkpoint_path.is_file():
+            # Try to load checkpoint metadata
+            try:
+                # For ZIP-based checkpoints, try to extract hyperparameters
+                # This might not work for all checkpoint formats
+                checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+                if isinstance(checkpoint, dict):
+                    # Try different keys where hyperparameters might be stored
+                    if "hyper_parameters" in checkpoint:
+                        hparams = checkpoint["hyper_parameters"]
+                    elif "hparams" in checkpoint:
+                        hparams = checkpoint["hparams"]
+                    elif "state_dict" in checkpoint and "hyper_parameters" in checkpoint.get("__metadata__", {}):
+                        hparams = checkpoint["__metadata__"]["hyper_parameters"]
+            except Exception as e:
+                # If we can't read metadata, that's okay - we'll use override_params
+                logger.debug(f"Could not extract hyperparameters from checkpoint: {e}")
+
+        # Merge checkpoint hyperparameters with override params
+        # override_params take precedence
+        model_params = {**hparams, **override_params}
+
+        # Create model instance with parameters
+        instance = cls(
+            max_epochs=model_params.get("max_epochs", 50),
+            batch_size=model_params.get("batch_size", 64),
+            learning_rate=model_params.get("learning_rate", 1e-3),
+            hidden_size=model_params.get("hidden_size", 300),
+            depth=model_params.get("depth", 3),
+            dropout=model_params.get("dropout", 0.0),
+            aggregation=model_params.get("aggregation", "mean"),
+            batch_norm=model_params.get("batch_norm", True),
+            ffn_num_layers=model_params.get("ffn_num_layers", 2),
+            use_foundation=model_params.get("use_foundation", False),
+            foundation_name=model_params.get("foundation_name", None),
+            use_focal_loss=model_params.get("use_focal_loss", False),
+            focal_alpha=model_params.get("focal_alpha", 0.25),
+            focal_gamma=model_params.get("focal_gamma", 2.0),
+            checkpoint_dir=model_params.get("checkpoint_dir", None),
+            random_seed=model_params.get("random_seed", 42),
+            accelerator=model_params.get("accelerator", None),
+            early_stopping_rounds=model_params.get("early_stopping_rounds", None),
+            early_stopping_metric=model_params.get("early_stopping_metric", "roc_auc"),
+            n_tasks=model_params.get("n_tasks", 1),
+        )
+
+        # Initialize featurizer
+        instance.featurizer = featurizers.SimpleMoleculeMolGraphFeaturizer()
+
+        # Load checkpoint into model using Lightning's load_from_checkpoint
+        # This handles both old and new checkpoint formats
+        instance.model = models.MPNN.load_from_checkpoint(str(checkpoint_path))
+
+        # Create a minimal trainer for prediction
+        instance.trainer = pl.Trainer(
+            accelerator=instance.accelerator,
+            devices=1,
+            logger=False,
+            enable_progress_bar=False,
+            enable_model_summary=False,
+        )
+
+        logger.info(f"Loaded model from checkpoint: {checkpoint_path}")
+        return instance
