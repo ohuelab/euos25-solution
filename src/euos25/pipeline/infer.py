@@ -9,6 +9,7 @@ import pandas as pd
 
 from euos25.config import Config
 from euos25.models.lgbm import LGBMClassifier
+from euos25.models import ChemPropModel, CHEMPROP_AVAILABLE
 from euos25.utils.io import load_json, load_parquet, save_csv
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,20 @@ def load_fold_model(model_dir: Path, config: Config):
     """
     if config.model.name == "lgbm":
         return LGBMClassifier.load(str(model_dir))
+    elif config.model.name == "chemprop":
+        if not CHEMPROP_AVAILABLE:
+            raise ImportError(
+                "ChemProp is not available. Please install chemprop package."
+            )
+        # Load ChemProp model from checkpoint
+        # model_dir can be a file or directory containing checkpoint
+        return ChemPropModel.load_from_checkpoint(
+            str(model_dir),
+            **config.model.params,
+            random_seed=config.seed,
+            early_stopping_rounds=config.early_stopping_rounds,
+            early_stopping_metric=config.early_stopping_metric,
+        )
     else:
         raise ValueError(f"Unknown model: {config.model.name}")
 
@@ -83,6 +98,11 @@ def predict_oof(
 
         # Predict
         preds = model.predict_proba(X_valid)
+
+        # Handle different output shapes: chemprop returns (n_samples, 2), lgbm returns (n_samples,)
+        if config.model.name == "chemprop" and preds.ndim == 2:
+            # Extract positive class probabilities
+            preds = preds[:, 1]
 
         # Store predictions using positional indices (predictions array is positional)
         predictions[valid_pos_indices] = preds
@@ -145,6 +165,11 @@ def predict_test(
         model = load_fold_model(full_model_path, config)
         predictions = model.predict_proba(features)
 
+        # Handle different output shapes: chemprop returns (n_samples, 2), lgbm returns (n_samples,)
+        if config.model.name == "chemprop" and predictions.ndim == 2:
+            # Extract positive class probabilities
+            predictions = predictions[:, 1]
+
         pred_df = pd.DataFrame({
             "mol_id": features.index,
             "prediction": predictions,
@@ -170,6 +195,12 @@ def predict_test(
 
             # Predict
             preds = model.predict_proba(features)
+
+            # Handle different output shapes: chemprop returns (n_samples, 2), lgbm returns (n_samples,)
+            if config.model.name == "chemprop" and preds.ndim == 2:
+                # Extract positive class probabilities
+                preds = preds[:, 1]
+
             all_predictions.append(preds)
 
         # Average or stack predictions

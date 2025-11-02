@@ -156,6 +156,7 @@ def train_fold(
 
     # Build checkpoint directory for ChemProp with task name and fold number
     checkpoint_dir = None
+    resume_ckpt = None
     if config.model.name == "chemprop" and output_dir is not None:
         actual_task_name = task_name if task_name is not None else config.task
         # Use checkpoint_dir from config if specified, otherwise construct from output_dir
@@ -167,13 +168,27 @@ def train_fold(
         # Ensure directory exists
         Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
 
+        # Check if there's a checkpoint to resume from
+        checkpoint_path = Path(checkpoint_dir)
+        last_ckpt = checkpoint_path / "last.ckpt"
+        if last_ckpt.exists():
+            resume_ckpt = str(last_ckpt)
+            logger.info(f"  Found checkpoint to resume from: {resume_ckpt}")
+        else:
+            # Check for any .ckpt file in the directory
+            ckpt_files = list(checkpoint_path.glob("*.ckpt"))
+            if ckpt_files:
+                # Use the most recent checkpoint
+                resume_ckpt = str(sorted(ckpt_files, key=lambda x: x.stat().st_mtime)[-1])
+                logger.info(f"  Found checkpoint to resume from: {resume_ckpt}")
+
     # Create model
     model = create_model(config, checkpoint_dir=checkpoint_dir)
 
     # Train model - handle different model signatures
     if config.model.name == "chemprop":
         # ChemProp uses X_val and y_val instead of eval_set
-        model.fit(X_train, y_train, X_val=X_valid, y_val=y_valid)
+        model.fit(X_train, y_train, X_val=X_valid, y_val=y_valid, resume_from_checkpoint=resume_ckpt)
     else:
         # LGBM and others use eval_set
         model.fit(
@@ -373,6 +388,7 @@ def train_full(
 
     # Build checkpoint directory for ChemProp with task name and "full" suffix
     checkpoint_dir = None
+    resume_ckpt = None
     if config.model.name == "chemprop":
         # Use checkpoint_dir from config if specified, otherwise construct from output_dir
         base_checkpoint_dir = config.model.params.get("checkpoint_dir")
@@ -382,6 +398,20 @@ def train_full(
             checkpoint_dir = str(output_path / "checkpoints" / "full")
         # Ensure directory exists
         Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
+
+        # Check if there's a checkpoint to resume from
+        checkpoint_path = Path(checkpoint_dir)
+        last_ckpt = checkpoint_path / "last.ckpt"
+        if last_ckpt.exists():
+            resume_ckpt = str(last_ckpt)
+            logger.info(f"  Found checkpoint to resume from: {resume_ckpt}")
+        else:
+            # Check for any .ckpt file in the directory
+            ckpt_files = list(checkpoint_path.glob("*.ckpt"))
+            if ckpt_files:
+                # Use the most recent checkpoint
+                resume_ckpt = str(sorted(ckpt_files, key=lambda x: x.stat().st_mtime)[-1])
+                logger.info(f"  Found checkpoint to resume from: {resume_ckpt}")
 
     # Create model
     model = create_model(config, checkpoint_dir=checkpoint_dir)
@@ -418,7 +448,7 @@ def train_full(
         logger.info(f"  Training with max_epochs={model.params.get('max_epochs', 'default')}")
         logger.info("  Training on full data (no validation set)")
         # ChemProp uses X_val and y_val instead of eval_set
-        model.fit(X_full, y_full, X_val=None, y_val=None)
+        model.fit(X_full, y_full, X_val=None, y_val=None, resume_from_checkpoint=resume_ckpt)
     else:
         # Generic fallback
         logger.info("  Training on full data (no validation set)")

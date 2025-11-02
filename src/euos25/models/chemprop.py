@@ -305,6 +305,7 @@ class ChemPropModel(BaseClfModel):
         y_train: np.ndarray,
         X_val: Optional[pd.DataFrame] = None,
         y_val: Optional[np.ndarray] = None,
+        resume_from_checkpoint: Optional[str] = None,
     ) -> "ChemPropModel":
         """Train the ChemProp model.
 
@@ -313,11 +314,16 @@ class ChemPropModel(BaseClfModel):
             y_train: Training labels
             X_val: Validation features (optional)
             y_val: Validation labels (optional)
+            resume_from_checkpoint: Path to checkpoint file to resume training from.
+                                   If None, training starts from scratch.
 
         Returns:
             Self
         """
-        logger.info("Training ChemProp model")
+        if resume_from_checkpoint:
+            logger.info(f"Resuming training from checkpoint: {resume_from_checkpoint}")
+        else:
+            logger.info("Training ChemProp model")
 
         # Initialize featurizer
         self.featurizer = featurizers.SimpleMoleculeMolGraphFeaturizer()
@@ -427,9 +433,34 @@ class ChemPropModel(BaseClfModel):
 
         self.trainer = pl.Trainer(**trainer_kwargs)
 
+        # Determine checkpoint path for resuming
+        ckpt_path = None
+        if resume_from_checkpoint:
+            checkpoint_path = Path(resume_from_checkpoint)
+            if checkpoint_path.exists():
+                # If it's a directory, look for last.ckpt
+                if checkpoint_path.is_dir():
+                    last_ckpt = checkpoint_path / "last.ckpt"
+                    if last_ckpt.exists():
+                        ckpt_path = str(last_ckpt)
+                    else:
+                        # Try to find any .ckpt file
+                        ckpt_files = list(checkpoint_path.glob("*.ckpt"))
+                        if ckpt_files:
+                            # Use the most recent checkpoint
+                            ckpt_path = str(sorted(ckpt_files, key=lambda x: x.stat().st_mtime)[-1])
+                            logger.info(f"Using checkpoint: {ckpt_path}")
+                elif checkpoint_path.is_file():
+                    ckpt_path = str(checkpoint_path)
+            else:
+                logger.warning(
+                    f"Checkpoint path does not exist: {resume_from_checkpoint}. "
+                    "Starting training from scratch."
+                )
+
         # Train with error handling for MPS
         try:
-            self.trainer.fit(self.model, train_loader, val_loader)
+            self.trainer.fit(self.model, train_loader, val_loader, ckpt_path=ckpt_path)
         except (RuntimeError, SystemError) as e:
             # If MPS fails, try falling back to CPU
             if self.accelerator == "mps" and "MPS" in str(e):
@@ -442,7 +473,7 @@ class ChemPropModel(BaseClfModel):
                 trainer_kwargs["deterministic"] = True
                 self.accelerator = "cpu"
                 self.trainer = pl.Trainer(**trainer_kwargs)
-                self.trainer.fit(self.model, train_loader, val_loader)
+                self.trainer.fit(self.model, train_loader, val_loader, ckpt_path=ckpt_path)
             else:
                 raise
 
