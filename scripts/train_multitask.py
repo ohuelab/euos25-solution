@@ -250,6 +250,12 @@ def train_multitask_cv(
         X_train = features.loc[train_ids]
         X_valid = features.loc[valid_ids]
 
+        # Verify SMILES column exists (required for ChemProp)
+        if "SMILES" not in X_train.columns:
+            raise ValueError(
+                f"SMILES column not found in features. Available columns: {X_train.columns.tolist()}"
+            )
+
         # Get labels - find common IDs between features and labels
         train_common = train_ids.intersection(labels_df.index)
         valid_common = valid_ids.intersection(labels_df.index)

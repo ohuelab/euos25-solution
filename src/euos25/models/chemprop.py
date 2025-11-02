@@ -1,6 +1,7 @@
 """ChemProp model wrapper for binary classification."""
 
 import logging
+import os
 from pathlib import Path
 from typing import Any, List, Optional, Tuple
 
@@ -14,6 +15,13 @@ from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from euos25.models.base import BaseClfModel
 
 logger = logging.getLogger(__name__)
+
+# Set OpenMP environment variables to prevent segmentation faults on macOS
+# These need to be set before importing torch or any libraries that use OpenMP
+if "KMP_DUPLICATE_LIB_OK" not in os.environ:
+    os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+if "OMP_NUM_THREADS" not in os.environ:
+    os.environ["OMP_NUM_THREADS"] = "1"
 
 
 class ChemPropModel(BaseClfModel):
@@ -102,7 +110,32 @@ class ChemPropModel(BaseClfModel):
             if torch.cuda.is_available():
                 self.accelerator = "cuda"
             elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                self.accelerator = "mps"
+                # Enable MPS fallback to CPU for unsupported operations
+                if "PYTORCH_ENABLE_MPS_FALLBACK" not in os.environ:
+                    os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+                    logger.info("Set PYTORCH_ENABLE_MPS_FALLBACK=1 for MPS stability")
+
+                # Set additional MPS stability environment variables
+                # These help prevent segmentation faults on macOS
+                if "PYTORCH_MPS_HIGH_WATERMARK_RATIO" not in os.environ:
+                    os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
+
+                # Test MPS availability with a simple operation to avoid segfault during training
+                # Use try-except to catch any RuntimeError that might occur
+                try:
+                    # Test basic MPS operations
+                    test_tensor = torch.randn(2, 2, device="mps")
+                    _ = test_tensor @ test_tensor.T
+                    torch.mps.synchronize()  # Ensure MPS operations complete
+                    # Clear any cached operations
+                    torch.mps.empty_cache()
+                    self.accelerator = "mps"
+                    logger.info("MPS accelerator validated and selected")
+                except (RuntimeError, Exception) as e:
+                    logger.warning(
+                        f"MPS test failed: {e}. Falling back to CPU to avoid segmentation faults."
+                    )
+                    self.accelerator = "cpu"
             else:
                 self.accelerator = "cpu"
         else:
@@ -178,6 +211,8 @@ class ChemPropModel(BaseClfModel):
             else:
                 dataset.normalize_targets(self.scaler)
 
+        # Always use num_workers=0 to avoid multiprocessing issues
+        # MPS and some PyTorch operations don't work well with multiprocessing
         return data.build_dataloader(
             dataset, batch_size=self.batch_size, shuffle=shuffle, num_workers=0
         )
@@ -358,18 +393,58 @@ class ChemPropModel(BaseClfModel):
                 f"monitor={monitor_metric}, mode={early_stopping_mode}"
             )
 
-        # Setup trainer
-        self.trainer = pl.Trainer(
-            max_epochs=self.max_epochs,
-            accelerator=self.accelerator,
-            devices=1,
-            callbacks=callbacks,
-            enable_progress_bar=True,
-            logger=False,
-        )
+        # Setup trainer with MPS-specific optimizations
+        trainer_kwargs = {
+            "max_epochs": self.max_epochs,
+            "accelerator": self.accelerator,
+            "devices": 1,
+            "callbacks": callbacks,
+            "enable_progress_bar": True,
+            "logger": False,
+            "num_sanity_val_steps": 0,  # Skip sanity check to avoid segfault on macOS MPS
+            "enable_model_summary": False,  # Disable model summary to avoid MPS issues
+        }
 
-        # Train
-        self.trainer.fit(self.model, train_loader, val_loader)
+        # MPS-specific settings to prevent segmentation faults
+        # Based on known issues: OpenMP conflicts, Sanity Checking crashes,
+        # and PyTorch Lightning's MPS backend stability issues on macOS
+        if self.accelerator == "mps":
+            # Use float32 precision (MPS doesn't fully support float16)
+            # "32" is recommended over "32-true" for better MPS compatibility
+            trainer_kwargs["precision"] = "32"
+            # Disable gradient accumulation issues on MPS
+            trainer_kwargs["accumulate_grad_batches"] = 1
+            # Set deterministic mode for reproducibility
+            trainer_kwargs["deterministic"] = False  # MPS doesn't support deterministic mode
+            # Disable gradient clipping on MPS (can cause crashes)
+            trainer_kwargs["gradient_clip_val"] = None
+            # Disable profiling which can cause issues
+            trainer_kwargs["profiler"] = None
+            logger.info(
+                "Applied MPS-specific optimizations to prevent segmentation faults: "
+                "32-bit precision, no gradient clipping, no profiling"
+            )
+
+        self.trainer = pl.Trainer(**trainer_kwargs)
+
+        # Train with error handling for MPS
+        try:
+            self.trainer.fit(self.model, train_loader, val_loader)
+        except (RuntimeError, SystemError) as e:
+            # If MPS fails, try falling back to CPU
+            if self.accelerator == "mps" and "MPS" in str(e):
+                logger.warning(
+                    f"MPS training failed: {e}. Falling back to CPU accelerator."
+                )
+                # Retry with CPU
+                trainer_kwargs["accelerator"] = "cpu"
+                trainer_kwargs.pop("precision", None)  # Remove MPS-specific precision
+                trainer_kwargs["deterministic"] = True
+                self.accelerator = "cpu"
+                self.trainer = pl.Trainer(**trainer_kwargs)
+                self.trainer.fit(self.model, train_loader, val_loader)
+            else:
+                raise
 
         # Set best_iteration for compatibility with training pipeline
         # For PyTorch Lightning, we use max_epochs as best_iteration
