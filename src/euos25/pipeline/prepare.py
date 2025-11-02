@@ -4,6 +4,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
+import datamol as dm
 import pandas as pd
 from rdkit import Chem
 
@@ -31,6 +32,49 @@ def normalize_smiles(smiles: str) -> Optional[str]:
         return None
 
 
+def standardize_smiles_dm(smiles: str) -> Optional[str]:
+    """Standardize SMILES string using datamol.
+
+    This function applies a comprehensive standardization procedure including:
+    - RDKit molecule sanitization
+    - Charge neutralization
+    - Tautomer canonicalization
+    - Stereochemistry handling
+
+    Args:
+        smiles: Input SMILES string
+
+    Returns:
+        Standardized SMILES or None if invalid
+    """
+    try:
+        standardized = dm.standardize_smiles(smiles)
+        return standardized if standardized else None
+    except Exception as e:
+        logger.debug(f"Failed to standardize SMILES: {smiles}, error: {e}")
+        return None
+
+
+def sanitize_smiles_dm(smiles: str, isomeric: bool = True) -> Optional[str]:
+    """Sanitize SMILES string using datamol.
+
+    This function sanitizes the SMILES representation.
+
+    Args:
+        smiles: Input SMILES string
+        isomeric: Whether to include stereochemistry information
+
+    Returns:
+        Sanitized SMILES or None if invalid
+    """
+    try:
+        sanitized = dm.sanitize_smiles(smiles, isomeric=isomeric)
+        return sanitized
+    except Exception as e:
+        logger.debug(f"Failed to sanitize SMILES: {smiles}, error: {e}")
+        return None
+
+
 def get_inchikey_block(smiles: str) -> Optional[str]:
     """Get first block of InChIKey for duplicate detection.
 
@@ -55,6 +99,7 @@ def prepare_data(
     output_path: Optional[str] = None,
     remove_duplicates: bool = True,
     normalize: bool = True,
+    standardize: bool = False,
 ) -> pd.DataFrame:
     """Prepare training data.
 
@@ -62,7 +107,7 @@ def prepare_data(
     1. Load data
     2. Standardize columns
     3. Clean SMILES
-    4. Normalize SMILES (optional)
+    4. Standardize/Normalize SMILES (optional)
     5. Remove duplicates based on InChIKey (optional)
     6. Save prepared data (optional)
 
@@ -70,7 +115,9 @@ def prepare_data(
         input_path: Path to input CSV
         output_path: Path to save prepared CSV (optional)
         remove_duplicates: Whether to remove duplicates
-        normalize: Whether to normalize SMILES
+        normalize: Whether to normalize SMILES (basic RDKit normalization)
+        standardize: Whether to standardize SMILES (comprehensive datamol standardization,
+                     takes precedence over normalize if both are True)
 
     Returns:
         Prepared DataFrame
@@ -87,21 +134,35 @@ def prepare_data(
     # Clean SMILES
     df = clean_smiles(df)
 
-    # Normalize SMILES
-    if normalize:
-        logger.info("Normalizing SMILES")
-        df["SMILES_normalized"] = df["SMILES"].apply(normalize_smiles)
+    # Standardize or Normalize SMILES
+    if standardize:
+        logger.info("Standardizing SMILES with datamol (includes tautomer canonicalization)")
+        df["SMILES_processed"] = df["SMILES"].apply(standardize_smiles_dm)
+
+        # Remove rows where standardization failed
+        before = len(df)
+        df = df[df["SMILES_processed"].notna()]
+        after = len(df)
+        if before != after:
+            logger.warning(f"Removed {before - after} rows with invalid SMILES during standardization")
+
+        # Replace original SMILES
+        df["SMILES"] = df["SMILES_processed"]
+        df = df.drop(columns=["SMILES_processed"])
+    elif normalize:
+        logger.info("Normalizing SMILES with RDKit")
+        df["SMILES_processed"] = df["SMILES"].apply(normalize_smiles)
 
         # Remove rows where normalization failed
         before = len(df)
-        df = df[df["SMILES_normalized"].notna()]
+        df = df[df["SMILES_processed"].notna()]
         after = len(df)
         if before != after:
-            logger.warning(f"Removed {before - after} rows with invalid SMILES")
+            logger.warning(f"Removed {before - after} rows with invalid SMILES during normalization")
 
         # Replace original SMILES
-        df["SMILES"] = df["SMILES_normalized"]
-        df = df.drop(columns=["SMILES_normalized"])
+        df["SMILES"] = df["SMILES_processed"]
+        df = df.drop(columns=["SMILES_processed"])
 
     # Remove duplicates
     if remove_duplicates:
