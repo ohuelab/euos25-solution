@@ -8,6 +8,7 @@ import pandas as pd
 
 from euos25.config import Config, FeaturizerConfig
 from euos25.featurizers.base import Featurizer
+from euos25.featurizers.chemeleon import ChemeleonFeaturizer
 from euos25.featurizers.conj_proxy import ConjugationProxyFeaturizer
 from euos25.featurizers.ecfp import ECFPFeaturizer
 from euos25.featurizers.rdkit2d import RDKit2DFeaturizer
@@ -31,6 +32,8 @@ def create_featurizer(config: FeaturizerConfig) -> Featurizer:
         return RDKit2DFeaturizer(**config.params)
     elif config.name == "conj_proxy":
         return ConjugationProxyFeaturizer(**config.params)
+    elif config.name == "chemeleon":
+        return ChemeleonFeaturizer(**config.params)
     else:
         raise ValueError(f"Unknown featurizer: {config.name}")
 
@@ -53,6 +56,18 @@ def build_features(
         DataFrame with all features (indexed by ID)
     """
     logger.info(f"Building features with {len(featurizers)} featurizers")
+
+    # If no featurizers, return DataFrame with just SMILES for models like ChemProp
+    if not featurizers:
+        logger.info("No featurizers specified - creating SMILES-only DataFrame for graph-based models")
+        features = df[[smiles_col]].copy()
+
+        # Set ID as index if available
+        if id_col in df.columns:
+            features.index = df[id_col].values
+
+        logger.info(f"Created SMILES-only DataFrame with {len(features)} samples")
+        return features
 
     # Start with ID index
     feature_dfs = []

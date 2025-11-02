@@ -10,6 +10,7 @@ import pandas as pd
 from euos25.config import Config
 from euos25.models.base import ClfModel
 from euos25.models.lgbm import LGBMClassifier
+from euos25.models import ChemPropModel, CHEMPROP_AVAILABLE
 from euos25.utils.io import load_json, load_parquet
 from euos25.utils.metrics import calc_metrics, save_fold_metrics
 
@@ -52,6 +53,31 @@ def create_model(config: Config) -> ClfModel:
 
     if model_name == "lgbm":
         return LGBMClassifier(**model_params)
+    elif model_name == "chemprop":
+        if not CHEMPROP_AVAILABLE:
+            raise ImportError(
+                "ChemProp is not available. Please install chemprop package."
+            )
+
+        # For ChemProp, focal loss parameters come from config.model.params or config.imbalance
+        # Check if use_focal_loss is set in model params (takes precedence)
+        if model_params.get("use_focal_loss", False):
+            # Focal loss params are already in model_params from config
+            pass
+        elif config.imbalance.use_focal_loss:
+            # Use focal loss from imbalance config
+            model_params["use_focal_loss"] = True
+            model_params["focal_alpha"] = config.imbalance.focal_alpha
+            model_params["focal_gamma"] = config.imbalance.focal_gamma
+
+        # Add random_seed from config
+        model_params["random_seed"] = config.seed
+
+        # Early stopping for ChemProp is handled internally via PyTorch Lightning
+        # Remove early_stopping_rounds from params as it's not used by ChemProp
+        model_params.pop("early_stopping_rounds", None)
+
+        return ChemPropModel(**model_params)
     else:
         raise ValueError(f"Unknown model: {model_name}")
 
@@ -86,12 +112,17 @@ def train_fold(
     # Create model
     model = create_model(config)
 
-    # Train model
-    model.fit(
-        X_train,
-        y_train,
-        eval_set=(X_valid, y_valid),
-    )
+    # Train model - handle different model signatures
+    if config.model.name == "chemprop":
+        # ChemProp uses X_val and y_val instead of eval_set
+        model.fit(X_train, y_train, X_val=X_valid, y_val=y_valid)
+    else:
+        # LGBM and others use eval_set
+        model.fit(
+            X_train,
+            y_train,
+            eval_set=(X_valid, y_valid),
+        )
 
     # Predict on validation
     y_pred = model.predict_proba(X_valid)
@@ -245,30 +276,45 @@ def train_full(
     logger.info("Training on full dataset")
     logger.info(f"  Full dataset: {len(y_full)} samples, pos={y_full.sum()}")
 
-    # Calculate average best_iteration from CV
-    avg_best_iter = int(np.mean(best_iterations))
-    logger.info(f"  Average best iteration from CV: {avg_best_iter}")
-
-    # Calculate size ratio: full_size / avg_train_size
-    avg_train_size = np.mean(train_sizes)
-    size_ratio = len(X_full) / avg_train_size
-    logger.info(f"  Size ratio (full / avg_train): {size_ratio:.3f}")
-
-    # Adjust n_estimators: int(0.9 * size_ratio * avg_best_iter)
-    adjusted_n_estimators = int(0.9 * size_ratio * avg_best_iter)
-    # Ensure at least avg_best_iter
-    adjusted_n_estimators = max(adjusted_n_estimators, avg_best_iter)
-    logger.info(f"  Adjusted n_estimators: {adjusted_n_estimators}")
-
-    # Create model with adjusted n_estimators
+    # Create model
     model = create_model(config)
-    # Override n_estimators for full training
-    original_n_estimators = model.params["n_estimators"]
-    model.params["n_estimators"] = adjusted_n_estimators
 
-    # Train on full data (no validation set, no early stopping)
-    logger.info(f"Training with {adjusted_n_estimators} rounds (no early stopping)")
-    model.fit(X_full, y_full, eval_set=None)
+    # Handle model-specific full training adjustments
+    if config.model.name == "lgbm":
+        # Calculate average best_iteration from CV
+        avg_best_iter = int(np.mean(best_iterations))
+        logger.info(f"  Average best iteration from CV: {avg_best_iter}")
+
+        # Calculate size ratio: full_size / avg_train_size
+        avg_train_size = np.mean(train_sizes)
+        size_ratio = len(X_full) / avg_train_size
+        logger.info(f"  Size ratio (full / avg_train): {size_ratio:.3f}")
+
+        # Adjust n_estimators: int(0.9 * size_ratio * avg_best_iter)
+        adjusted_n_estimators = int(0.9 * size_ratio * avg_best_iter)
+        # Ensure at least avg_best_iter
+        adjusted_n_estimators = max(adjusted_n_estimators, avg_best_iter)
+        logger.info(f"  Adjusted n_estimators: {adjusted_n_estimators}")
+
+        # Override n_estimators for full training
+        original_n_estimators = model.params["n_estimators"]
+        model.params["n_estimators"] = adjusted_n_estimators
+
+        # Train on full data (no validation set, no early stopping)
+        logger.info(f"Training with {adjusted_n_estimators} rounds (no early stopping)")
+        model.fit(X_full, y_full, eval_set=None)
+
+        # Restore original n_estimators (for metadata consistency)
+        model.params["n_estimators"] = original_n_estimators
+    elif config.model.name == "chemprop":
+        # For ChemProp, use max_epochs from config (no adjustment needed)
+        logger.info(f"  Training with max_epochs={model.params.get('max_epochs', 'default')}")
+        logger.info("  Training on full data (no validation set)")
+        model.fit(X_full, y_full, eval_set=None)
+    else:
+        # Generic fallback
+        logger.info("  Training on full data (no validation set)")
+        model.fit(X_full, y_full, eval_set=None)
 
     # Save full model
     full_model_dir = output_path / "full_model"
@@ -276,8 +322,5 @@ def train_full(
 
     logger.info(f"Saved full model to {full_model_dir}")
     logger.info("=" * 50)
-
-    # Restore original n_estimators (for metadata consistency)
-    model.params["n_estimators"] = original_n_estimators
 
     return model

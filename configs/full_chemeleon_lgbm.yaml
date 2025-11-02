@@ -15,7 +15,7 @@ metrics:
 featurizers:
   - name: "chemeleon"
     params:
-      chemeleon_path: "chemeleon_mp.pt"
+      chemeleon_path: "data/pretrained/chemeleon_mp.pt"
       aggregation: "mean"
       device: null  # Auto-detect (cuda/mps/cpu)
 
@@ -50,7 +50,7 @@ imbalance:
 # Optuna (can be enabled for hyperparameter tuning)
 optuna:
   enable: false
-  n_trials: 100
+  n_trials: 1000
   timeout: null
   study_name: "chemeleon_lgbm_optuna"
   storage_enable: true
@@ -70,7 +70,7 @@ optuna:
       max: 12
 
 # Early stopping
-early_stopping_rounds: 50
+early_stopping_rounds: 200
 early_stopping_metric: "roc_auc"
 
 # Logging

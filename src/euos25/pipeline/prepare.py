@@ -36,19 +36,44 @@ def standardize_smiles_dm(smiles: str) -> Optional[str]:
     """Standardize SMILES string using datamol.
 
     This function applies a comprehensive standardization procedure including:
+    - Multiple fragment handling (keeps largest fragment if multiple components)
+    - Salt/solvent removal (e.g., .Cl, .HCl, .O=C(O)C(F)(F)F)
     - RDKit molecule sanitization
     - Charge neutralization
     - Tautomer canonicalization
     - Stereochemistry handling
 
     Args:
-        smiles: Input SMILES string
+        smiles: Input SMILES string (may contain salts/solvents like .Cl, .HCl,
+                or larger fragments like .O=C(O)C(F)(F)F)
 
     Returns:
         Standardized SMILES or None if invalid
     """
     try:
-        standardized = dm.standardize_smiles(smiles)
+        # First, parse the SMILES to a molecule object
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            return None
+
+        # Handle multiple fragments: if there are multiple disconnected components,
+        # keep only the largest one (by number of atoms)
+        frags = Chem.GetMolFrags(mol, asMols=True)
+        if len(frags) > 1:
+            # Select the largest fragment
+            mol = max(frags, key=lambda x: x.GetNumAtoms())
+            logger.debug(f"Multiple fragments detected, keeping largest fragment ({mol.GetNumAtoms()} atoms)")
+
+        # Remove salts and solvents from the selected fragment (e.g., .Cl, .HCl, etc.)
+        mol_no_salt = dm.remove_salts_solvents(mol)
+        if mol_no_salt is None:
+            return None
+
+        # Convert back to SMILES before standardizing
+        smiles_no_salt = Chem.MolToSmiles(mol_no_salt)
+
+        # Apply comprehensive standardization
+        standardized = dm.standardize_smiles(smiles_no_salt)
         return standardized if standardized else None
     except Exception as e:
         logger.debug(f"Failed to standardize SMILES: {smiles}, error: {e}")
@@ -99,7 +124,7 @@ def prepare_data(
     output_path: Optional[str] = None,
     remove_duplicates: bool = True,
     normalize: bool = True,
-    standardize: bool = False,
+    standardize: bool = True,
 ) -> pd.DataFrame:
     """Prepare training data.
 

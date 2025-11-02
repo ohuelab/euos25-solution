@@ -104,6 +104,7 @@ class ChemPropModel(BaseClfModel):
         self.trainer = None
         self.featurizer = None
         self.scaler = None
+        self.best_iteration: int = 0  # For compatibility with training pipeline
 
         # Set random seed
         pl.seed_everything(self.random_seed)
@@ -306,6 +307,11 @@ class ChemPropModel(BaseClfModel):
 
         # Train
         self.trainer.fit(self.model, train_loader, val_loader)
+
+        # Set best_iteration for compatibility with training pipeline
+        # For PyTorch Lightning, we use max_epochs as best_iteration
+        # In practice, the best checkpoint is saved by ModelCheckpoint callback
+        self.best_iteration = self.max_epochs
 
         logger.info("Training completed")
         return self

@@ -15,8 +15,8 @@ metrics:
 model:
   name: "chemprop"
   params:
-    max_epochs: 50
-    batch_size: 64
+    max_epochs: 1000
+    batch_size: 128
     learning_rate: 0.0001  # Lower LR for foundation model fine-tuning
     hidden_size: 300
     depth: 3
@@ -43,7 +43,7 @@ optuna:
   enable: false
 
 # Early stopping
-early_stopping_rounds: 10
+early_stopping_rounds: 200
 early_stopping_metric: "roc_auc"
 
 # Logging
