@@ -1,12 +1,16 @@
-# Full Chemeleon configuration for production training
-# Uses ChemProp with Chemeleon foundation model
+# Multi-task ChemProp configuration for all 4 tasks
+# Tasks: transmittance340, transmittance450, fluorescence340_450, fluorescence480
 
 seed: 42
 folds: 5
 scaffold_min_size: 10
 
-# Task configuration
-task: "transmittance340"
+# Multi-task configuration
+tasks:
+  - "transmittance340"
+  - "transmittance450"
+  - "fluorescence340_450"
+  - "fluorescence480"
 metrics:
   - "roc_auc"
   - "pr_auc"
@@ -17,16 +21,15 @@ model:
   params:
     max_epochs: 1000
     batch_size: 128
-    learning_rate: 0.0001  # Lower LR for foundation model fine-tuning
+    learning_rate: 0.001
     hidden_size: 300
     depth: 3
     dropout: 0.1
     aggregation: "mean"
-    batch_norm: false  # Typically false with foundation models
+    batch_norm: true
     ffn_num_layers: 2
-    use_foundation: true
-    foundation_name: "chemeleon"
-    checkpoint_dir: "outputs/full_chemeleon/checkpoints"
+    use_foundation: false
+    checkpoint_dir: "outputs/multitask_all_chemprop/checkpoints"
 
 # No featurizers needed for ChemProp
 featurizers: []
@@ -48,6 +51,3 @@ early_stopping_metric: "roc_auc"
 
 # Logging
 log_level: "INFO"
-
-# Note: Chemeleon foundation model weights (chemeleon_mp.pt) must be downloaded separately
-# See: https://chemprop.readthedocs.io/en/latest/chemeleon_foundation_finetuning.html

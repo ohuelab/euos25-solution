@@ -42,7 +42,7 @@ optuna:
   enable: false
 
 # Early stopping
-early_stopping_rounds: 200
+early_stopping_rounds: 30
 early_stopping_metric: "roc_auc"
 
 # Logging

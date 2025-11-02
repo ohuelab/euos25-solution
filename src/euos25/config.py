@@ -124,7 +124,11 @@ class Config(BaseModel):
     plates: PlatesConfig = Field(default_factory=PlatesConfig)
     optuna: OptunaConfig = Field(default_factory=OptunaConfig)
 
-    task: str = "y_fluo_any"
+    # Task configuration
+    # For single task: task = "transmittance340"
+    # For multi-task: tasks = ["transmittance340", "transmittance570"]
+    task: Optional[str] = "y_fluo_any"
+    tasks: Optional[List[str]] = None
     metrics: List[str] = Field(default_factory=lambda: ["roc_auc", "pr_auc"])
 
     # Early stopping
@@ -133,6 +137,25 @@ class Config(BaseModel):
 
     # Logging
     log_level: str = "INFO"
+
+    @property
+    def is_multitask(self) -> bool:
+        """Check if this is a multi-task configuration."""
+        return self.tasks is not None and len(self.tasks) > 1
+
+    @property
+    def n_tasks(self) -> int:
+        """Get number of tasks."""
+        if self.tasks is not None:
+            return len(self.tasks)
+        return 1
+
+    @property
+    def task_names(self) -> List[str]:
+        """Get list of task names."""
+        if self.tasks is not None:
+            return self.tasks
+        return [self.task] if self.task else []
 
     @classmethod
     def from_yaml(cls, path: str) -> "Config":

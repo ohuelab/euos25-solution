@@ -44,6 +44,7 @@ class ChemPropModel(BaseClfModel):
         accelerator: Optional[str] = None,
         early_stopping_rounds: Optional[int] = None,
         early_stopping_metric: str = "roc_auc",
+        n_tasks: int = 1,
         **kwargs,
     ):
         """Initialize ChemProp model.
@@ -71,6 +72,7 @@ class ChemPropModel(BaseClfModel):
             early_stopping_rounds: Number of epochs to wait before early stopping (patience).
                                   If None, early stopping is disabled.
             early_stopping_metric: Metric to monitor for early stopping ('roc_auc', 'pr_auc', etc.)
+            n_tasks: Number of tasks for multi-task learning (default 1 for single task)
             **kwargs: Additional parameters
         """
         super().__init__(name="chemprop", **kwargs)
@@ -92,6 +94,7 @@ class ChemPropModel(BaseClfModel):
         self.random_seed = random_seed
         self.early_stopping_rounds = early_stopping_rounds
         self.early_stopping_metric = early_stopping_metric
+        self.n_tasks = n_tasks
 
         # Determine accelerator
         if accelerator is None or accelerator == "auto":
@@ -123,17 +126,25 @@ class ChemPropModel(BaseClfModel):
 
         Args:
             smiles: List of SMILES strings
-            labels: Optional labels
+            labels: Optional labels. Shape (n_samples,) for single task or (n_samples, n_tasks) for multi-task
 
         Returns:
             List of MoleculeDatapoint objects
         """
         if labels is not None:
-            # For training/validation with labels
-            datapoints = [
-                data.MoleculeDatapoint.from_smi(smi, [float(label)])
-                for smi, label in zip(smiles, labels)
-            ]
+            # Handle both single-task and multi-task labels
+            if labels.ndim == 1:
+                # Single task: shape (n_samples,)
+                datapoints = [
+                    data.MoleculeDatapoint.from_smi(smi, [float(label)])
+                    for smi, label in zip(smiles, labels)
+                ]
+            else:
+                # Multi-task: shape (n_samples, n_tasks)
+                datapoints = [
+                    data.MoleculeDatapoint.from_smi(smi, [float(l) for l in label_row])
+                    for smi, label_row in zip(smiles, labels)
+                ]
         else:
             # For prediction without labels
             datapoints = [data.MoleculeDatapoint.from_smi(smi) for smi in smiles]
@@ -214,13 +225,13 @@ class ChemPropModel(BaseClfModel):
             output_transform = None
 
         # Feed-forward network
-        # For binary classification, we use n_tasks=1
+        # For binary classification, we use n_tasks (1 for single task, >1 for multi-task)
         # input_dim should match the output dimension of message passing
         if self.use_focal_loss:
             from euos25.models.chemprop_focal import create_focal_loss_ffn
 
             ffn = create_focal_loss_ffn(
-                n_tasks=1,
+                n_tasks=self.n_tasks,
                 input_dim=mp.output_dim,
                 hidden_dim=self.hidden_size,
                 n_layers=self.ffn_num_layers,
@@ -231,7 +242,7 @@ class ChemPropModel(BaseClfModel):
             )
         else:
             ffn = nn.BinaryClassificationFFN(
-                n_tasks=1,
+                n_tasks=self.n_tasks,
                 input_dim=mp.output_dim,
                 hidden_dim=self.hidden_size,
                 n_layers=self.ffn_num_layers,
@@ -375,7 +386,8 @@ class ChemPropModel(BaseClfModel):
             X: Features (must contain 'SMILES' column)
 
         Returns:
-            Predicted probabilities of shape (n_samples, 2)
+            For single task: Predicted probabilities of shape (n_samples, 2)
+            For multi-task: Predicted probabilities of shape (n_samples, n_tasks)
         """
         if self.model is None:
             raise ValueError("Model not fitted. Call fit() first.")
@@ -393,12 +405,15 @@ class ChemPropModel(BaseClfModel):
         # Convert to numpy array
         probs = torch.cat(predictions).cpu().numpy()
 
-        # For binary classification, convert to (n_samples, 2) shape
-        probs_positive = probs.reshape(-1)
-        probs_negative = 1 - probs_positive
-        probs_binary = np.column_stack([probs_negative, probs_positive])
-
-        return probs_binary
+        if self.n_tasks == 1:
+            # For single task binary classification, convert to (n_samples, 2) shape
+            probs_positive = probs.reshape(-1)
+            probs_negative = 1 - probs_positive
+            probs_binary = np.column_stack([probs_negative, probs_positive])
+            return probs_binary
+        else:
+            # For multi-task, return (n_samples, n_tasks) - probabilities of positive class for each task
+            return probs
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:
         """Predict class labels.
@@ -407,10 +422,15 @@ class ChemPropModel(BaseClfModel):
             X: Features (must contain 'SMILES' column)
 
         Returns:
-            Predicted labels
+            For single task: Predicted labels of shape (n_samples,)
+            For multi-task: Predicted labels of shape (n_samples, n_tasks)
         """
         probs = self.predict_proba(X)
-        return (probs[:, 1] > 0.5).astype(int)
+        if self.n_tasks == 1:
+            return (probs[:, 1] > 0.5).astype(int)
+        else:
+            # For multi-task, threshold each task independently
+            return (probs > 0.5).astype(int)
 
     def save(self, path: str) -> None:
         """Save model to disk.
