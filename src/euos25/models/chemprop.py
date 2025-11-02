@@ -294,8 +294,8 @@ class ChemPropModel(BaseClfModel):
 
         # Map early_stopping_metric to PyTorch Lightning metric name
         metric_name_map = {
-            "roc_auc": "val_AUROC",
-            "pr_auc": "val_AUPRC",  # Assuming PR-AUC is logged as AUPRC
+            "roc_auc": "val/roc",
+            "pr_auc": "val/pr",  # Assuming PR-AUC is logged as pr
         }
         monitor_metric = metric_name_map.get(
             self.early_stopping_metric.lower(), "val_loss"
