@@ -60,7 +60,7 @@ def predict_multitask_oof(
 
         # Load model
         fold_model_dir = model_path / f"fold_{fold_idx}"
-        model = ChemPropModel.load(str(fold_model_dir))
+        model = ChemPropModel.load_from_checkpoint(str(fold_model_dir))
 
         # Get validation indices
         valid_pos_indices = fold_data["valid"]
@@ -140,7 +140,7 @@ def predict_multitask_test(
             logger.warning(f"Model directory not found: {fold_model_dir}, skipping")
             continue
 
-        model = ChemPropModel.load(str(fold_model_dir))
+        model = ChemPropModel.load_from_checkpoint(str(fold_model_dir))
 
         # Predict - returns (n_samples, n_tasks)
         y_pred = model.predict_proba(features)

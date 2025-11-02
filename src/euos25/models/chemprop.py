@@ -653,8 +653,33 @@ class ChemPropModel(BaseClfModel):
         instance.featurizer = featurizers.SimpleMoleculeMolGraphFeaturizer()
 
         # Load checkpoint into model using Lightning's load_from_checkpoint
-        # This handles both old and new checkpoint formats
-        instance.model = models.MPNN.load_from_checkpoint(str(checkpoint_path))
+        # Always load to CPU first to avoid CUDA errors on CPU-only machines
+        # Temporarily patch torch.load to always use map_location="cpu"
+        original_load = torch.load
+
+        def cpu_load(*args, **kwargs):
+            # torch.load signature: load(f, map_location=None, pickle_module=pickle, ...)
+            # Check if map_location is provided as positional argument (2nd arg)
+            # or keyword argument
+            if len(args) >= 2:
+                # map_location is provided as positional argument, replace it
+                args_list = list(args)
+                args_list[1] = 'cpu'  # Replace map_location (2nd positional arg)
+                args = tuple(args_list)
+                # Remove map_location from kwargs if present to avoid conflict
+                kwargs.pop('map_location', None)
+            else:
+                # No positional map_location, set/override in kwargs
+                kwargs['map_location'] = 'cpu'
+            return original_load(*args, **kwargs)
+
+        # Patch torch.load temporarily
+        torch.load = cpu_load
+        try:
+            instance.model = models.MPNN.load_from_checkpoint(str(checkpoint_path))
+        finally:
+            # Restore original torch.load
+            torch.load = original_load
 
         # Create a minimal trainer for prediction
         instance.trainer = pl.Trainer(

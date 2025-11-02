@@ -137,6 +137,66 @@ def train_multitask_fold(
         valid_pos = y_valid[:, task_idx].sum()
         logger.info(f"  Task {task_name}: train pos={train_pos}, valid pos={valid_pos}")
 
+    # Check if model already exists
+    if output_dir:
+        model_dir = output_dir / f"fold_{fold_idx}"
+        if config.model.name == "chemprop":
+            # For ChemProp, check if model exists (can be file or directory)
+            model_exists = False
+            if model_dir.exists():
+                if model_dir.is_file():
+                    # Model is saved as a single checkpoint file
+                    model_exists = True
+                elif model_dir.is_dir():
+                    # Model directory exists, check for checkpoint files
+                    ckpt_files = list(model_dir.glob("*.ckpt"))
+                    if ckpt_files:
+                        model_exists = True
+
+            if model_exists:
+                logger.info(f"  Model already exists at {model_dir}, skipping training")
+                # Load existing model
+                model_params = config.model.params.copy()
+                model_params["n_tasks"] = config.n_tasks
+                model_params["random_seed"] = config.seed
+                model_params["early_stopping_rounds"] = config.early_stopping_rounds
+                model_params["early_stopping_metric"] = config.early_stopping_metric
+
+                # Add imbalance handling parameters
+                if config.imbalance.use_focal_loss:
+                    model_params["use_focal_loss"] = True
+                    model_params["focal_alpha"] = config.imbalance.focal_alpha
+                    model_params["focal_gamma"] = config.imbalance.focal_gamma
+
+                model = ChemPropModel.load_from_checkpoint(str(model_dir), **model_params)
+
+                # Predict on validation to compute metrics
+                y_pred = model.predict_proba(X_valid)
+
+                # Calculate metrics per task
+                metrics = {}
+                for task_idx, task_name in enumerate(config.task_names):
+                    # For multi-task, y_pred is (n_samples, n_tasks) - probabilities of positive class for each task
+                    task_pred_proba = y_pred[:, task_idx]
+                    task_metrics = calc_metrics(
+                        y_valid[:, task_idx], task_pred_proba, metrics=config.metrics
+                    )
+
+                    for metric_name, score in task_metrics.items():
+                        metrics[f"{task_name}_{metric_name}"] = score
+                        logger.info(f"  {task_name} {metric_name}: {score:.6f}")
+
+                # Calculate average metrics across tasks
+                for metric_name in config.metrics:
+                    task_scores = [
+                        metrics[f"{task}_{metric_name}"] for task in config.task_names
+                    ]
+                    avg_score = np.mean(task_scores)
+                    metrics[f"avg_{metric_name}"] = avg_score
+                    logger.info(f"  Average {metric_name}: {avg_score:.6f}")
+
+                return model, metrics
+
     # Build checkpoint directory
     checkpoint_dir = None
     if config.model.name == "chemprop" and output_dir is not None:
@@ -175,11 +235,10 @@ def train_multitask_fold(
     # Calculate metrics per task
     metrics = {}
     for task_idx, task_name in enumerate(config.task_names):
-        # For multi-task, y_pred is (n_samples, n_tasks), we need to convert to (n_samples, 2) for each task
-        task_pred_pos = y_pred[:, task_idx]
-        task_pred = np.column_stack([1 - task_pred_pos, task_pred_pos])
+        # For multi-task, y_pred is (n_samples, n_tasks) - probabilities of positive class for each task
+        task_pred_proba = y_pred[:, task_idx]
         task_metrics = calc_metrics(
-            y_valid[:, task_idx], task_pred, metrics=config.metrics
+            y_valid[:, task_idx], task_pred_proba, metrics=config.metrics
         )
 
         for metric_name, score in task_metrics.items():
