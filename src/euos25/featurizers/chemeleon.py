@@ -78,8 +78,8 @@ class ChemeleonFeaturizer(BaseFeaturizer):
 
         logger.info(f"Loading Chemeleon from {chemeleon_path}")
 
-        # Load pretrained weights
-        chemeleon_mp = torch.load(chemeleon_path, map_location=self.device, weights_only=True)
+        # Load pretrained weights (always load to CPU first to avoid CUDA errors)
+        chemeleon_mp = torch.load(chemeleon_path, map_location="cpu", weights_only=True)
 
         # Create message passing layer
         self.mp = nn.BondMessagePassing(**chemeleon_mp["hyper_parameters"])

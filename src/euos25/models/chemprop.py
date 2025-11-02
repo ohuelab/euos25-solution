@@ -228,7 +228,7 @@ class ChemPropModel(BaseClfModel):
             logger.info("Loading Chemeleon foundation model")
             # Load pretrained Chemeleon weights
             try:
-                chemeleon_mp = torch.load("chemeleon_mp.pt", weights_only=True)
+                chemeleon_mp = torch.load("chemeleon_mp.pt", map_location="cpu", weights_only=True)
                 mp = nn.BondMessagePassing(**chemeleon_mp["hyper_parameters"])
                 mp.load_state_dict(chemeleon_mp["state_dict"])
             except FileNotFoundError:
