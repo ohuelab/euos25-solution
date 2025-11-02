@@ -41,6 +41,7 @@ class ChemPropModel(BaseClfModel):
         focal_gamma: float = 2.0,
         checkpoint_dir: Optional[str] = None,
         random_seed: int = 42,
+        accelerator: Optional[str] = None,
         **kwargs,
     ):
         """Initialize ChemProp model.
@@ -62,6 +63,9 @@ class ChemPropModel(BaseClfModel):
             focal_gamma: Gamma parameter for focal loss (focusing parameter)
             checkpoint_dir: Directory to save model checkpoints
             random_seed: Random seed for reproducibility
+            accelerator: Accelerator to use ('auto', 'cpu', 'cuda', 'mps').
+                        If None or 'auto', automatically selects based on availability.
+                        On macOS, 'auto' will select 'mps' if available, else 'cpu'.
             **kwargs: Additional parameters
         """
         super().__init__(name="chemprop", **kwargs)
@@ -81,6 +85,20 @@ class ChemPropModel(BaseClfModel):
         self.focal_gamma = focal_gamma
         self.checkpoint_dir = checkpoint_dir or "checkpoints/chemprop"
         self.random_seed = random_seed
+
+        # Determine accelerator
+        if accelerator is None or accelerator == "auto":
+            # Auto-detect: CUDA > MPS > CPU
+            if torch.cuda.is_available():
+                self.accelerator = "cuda"
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                self.accelerator = "mps"
+            else:
+                self.accelerator = "cpu"
+        else:
+            self.accelerator = accelerator
+
+        logger.info(f"Using accelerator: {self.accelerator}")
 
         self.model = None
         self.trainer = None
@@ -279,7 +297,7 @@ class ChemPropModel(BaseClfModel):
         # Setup trainer
         self.trainer = pl.Trainer(
             max_epochs=self.max_epochs,
-            accelerator="auto",
+            accelerator=self.accelerator,
             devices=1,
             callbacks=[checkpoint_callback],
             enable_progress_bar=True,
