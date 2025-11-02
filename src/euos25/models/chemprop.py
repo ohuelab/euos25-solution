@@ -509,16 +509,56 @@ class ChemPropModel(BaseClfModel):
         predictions = self.trainer.predict(self.model, test_loader)
 
         # Convert to numpy array
+        # predictions is a list of tensors from each batch
         probs = torch.cat(predictions).cpu().numpy()
+
+        # Ensure correct shape
+        n_samples = len(X)
 
         if self.n_tasks == 1:
             # For single task binary classification, convert to (n_samples, 2) shape
             probs_positive = probs.reshape(-1)
+            if len(probs_positive) != n_samples:
+                raise ValueError(
+                    f"Shape mismatch: expected {n_samples} samples, got {len(probs_positive)}. "
+                    f"Model may be duplicating predictions."
+                )
             probs_negative = 1 - probs_positive
             probs_binary = np.column_stack([probs_negative, probs_positive])
             return probs_binary
         else:
             # For multi-task, return (n_samples, n_tasks) - probabilities of positive class for each task
+            # Ensure shape is correct
+            if probs.ndim == 1:
+                # If 1D, reshape to (n_samples, n_tasks)
+                if len(probs) != n_samples * self.n_tasks:
+                    raise ValueError(
+                        f"Shape mismatch: expected {n_samples * self.n_tasks} values, "
+                        f"got {len(probs)}. Expected shape ({n_samples}, {self.n_tasks})."
+                    )
+                probs = probs.reshape(n_samples, self.n_tasks)
+            elif probs.ndim == 2:
+                # If 2D, validate shape
+                if probs.shape[0] != n_samples:
+                    raise ValueError(
+                        f"Shape mismatch: expected {n_samples} samples, got {probs.shape[0]}. "
+                        f"Model may be duplicating predictions."
+                    )
+                if probs.shape[1] != self.n_tasks:
+                    # If shape is (n_samples, 1) but n_tasks > 1, try to expand
+                    if probs.shape[1] == 1 and self.n_tasks > 1:
+                        logger.warning(
+                            f"Model output has shape ({probs.shape[0]}, 1) but n_tasks={self.n_tasks}. "
+                            f"This may indicate incorrect model configuration."
+                        )
+                    else:
+                        raise ValueError(
+                            f"Shape mismatch: expected {self.n_tasks} tasks, got {probs.shape[1]}."
+                        )
+            else:
+                raise ValueError(
+                    f"Unexpected prediction shape: {probs.shape}. Expected ({n_samples}, {self.n_tasks})."
+                )
             return probs
 
     def predict(self, X: pd.DataFrame) -> np.ndarray:

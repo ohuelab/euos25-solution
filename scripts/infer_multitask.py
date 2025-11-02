@@ -60,7 +60,11 @@ def predict_multitask_oof(
 
         # Load model
         fold_model_dir = model_path / f"fold_{fold_idx}"
-        model = ChemPropModel.load_from_checkpoint(str(fold_model_dir))
+        model = ChemPropModel.load_from_checkpoint(
+            str(fold_model_dir),
+            n_tasks=config.n_tasks,
+            **config.model.params,
+        )
 
         # Get validation indices
         valid_pos_indices = fold_data["valid"]
@@ -69,6 +73,18 @@ def predict_multitask_oof(
 
         # Predict - returns (n_samples, n_tasks)
         y_pred = model.predict_proba(X_valid)
+
+        # Validate shape
+        if y_pred.shape[0] != len(valid_pos_indices):
+            raise ValueError(
+                f"Shape mismatch: expected {len(valid_pos_indices)} samples, got {y_pred.shape[0]}. "
+                f"Model may have incorrect n_tasks setting (expected {config.n_tasks})."
+            )
+        if y_pred.shape[1] != config.n_tasks:
+            raise ValueError(
+                f"Shape mismatch: expected {config.n_tasks} tasks, got {y_pred.shape[1]}. "
+                f"Model may have incorrect n_tasks setting."
+            )
 
         # Store predictions
         for i, idx in enumerate(valid_pos_indices):
@@ -140,10 +156,27 @@ def predict_multitask_test(
             logger.warning(f"Model directory not found: {fold_model_dir}, skipping")
             continue
 
-        model = ChemPropModel.load_from_checkpoint(str(fold_model_dir))
+        # Load model with n_tasks parameter to ensure correct multi-task handling
+        model = ChemPropModel.load_from_checkpoint(
+            str(fold_model_dir),
+            n_tasks=config.n_tasks,
+            **config.model.params,
+        )
 
         # Predict - returns (n_samples, n_tasks)
         y_pred = model.predict_proba(features)
+
+        # Validate shape
+        if y_pred.shape[0] != n_samples:
+            raise ValueError(
+                f"Shape mismatch: expected {n_samples} samples, got {y_pred.shape[0]}. "
+                f"Model may have incorrect n_tasks setting (expected {n_tasks})."
+            )
+        if y_pred.shape[1] != n_tasks:
+            raise ValueError(
+                f"Shape mismatch: expected {n_tasks} tasks, got {y_pred.shape[1]}. "
+                f"Model may have incorrect n_tasks setting."
+            )
 
         # Accumulate predictions
         predictions += y_pred
