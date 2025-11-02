@@ -36,6 +36,9 @@ class ChemPropModel(BaseClfModel):
         ffn_num_layers: int = 2,
         use_foundation: bool = False,
         foundation_name: Optional[str] = None,
+        use_focal_loss: bool = False,
+        focal_alpha: float = 0.25,
+        focal_gamma: float = 2.0,
         checkpoint_dir: Optional[str] = None,
         random_seed: int = 42,
         **kwargs,
@@ -54,6 +57,9 @@ class ChemPropModel(BaseClfModel):
             ffn_num_layers: Number of feed-forward network layers
             use_foundation: Whether to use foundation model (e.g., Chemeleon)
             foundation_name: Name of foundation model ('chemeleon')
+            use_focal_loss: Whether to use Focal loss for imbalanced data
+            focal_alpha: Alpha parameter for focal loss (weighting factor)
+            focal_gamma: Gamma parameter for focal loss (focusing parameter)
             checkpoint_dir: Directory to save model checkpoints
             random_seed: Random seed for reproducibility
             **kwargs: Additional parameters
@@ -70,6 +76,9 @@ class ChemPropModel(BaseClfModel):
         self.ffn_num_layers = ffn_num_layers
         self.use_foundation = use_foundation
         self.foundation_name = foundation_name
+        self.use_focal_loss = use_focal_loss
+        self.focal_alpha = focal_alpha
+        self.focal_gamma = focal_gamma
         self.checkpoint_dir = checkpoint_dir or "checkpoints/chemprop"
         self.random_seed = random_seed
 
@@ -181,14 +190,28 @@ class ChemPropModel(BaseClfModel):
         # Feed-forward network
         # For binary classification, we use n_tasks=1
         # input_dim should match the output dimension of message passing
-        ffn = nn.BinaryClassificationFFN(
-            n_tasks=1,
-            input_dim=mp.output_dim,
-            hidden_dim=self.hidden_size,
-            n_layers=self.ffn_num_layers,
-            dropout=self.dropout,
-            output_transform=output_transform,
-        )
+        if self.use_focal_loss:
+            from euos25.models.chemprop_focal import create_focal_loss_ffn
+
+            ffn = create_focal_loss_ffn(
+                n_tasks=1,
+                input_dim=mp.output_dim,
+                hidden_dim=self.hidden_size,
+                n_layers=self.ffn_num_layers,
+                dropout=self.dropout,
+                focal_alpha=self.focal_alpha,
+                focal_gamma=self.focal_gamma,
+                output_transform=output_transform,
+            )
+        else:
+            ffn = nn.BinaryClassificationFFN(
+                n_tasks=1,
+                input_dim=mp.output_dim,
+                hidden_dim=self.hidden_size,
+                n_layers=self.ffn_num_layers,
+                dropout=self.dropout,
+                output_transform=output_transform,
+            )
 
         # Metrics
         metric_list = [nn.metrics.BinaryAUROC(), nn.metrics.BinaryAccuracy()]
