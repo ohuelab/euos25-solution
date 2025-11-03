@@ -1,0 +1,89 @@
+seed: 42
+folds: 5
+scaffold_min_size: 10
+
+featurizers:
+  - name: ecfp
+    params:
+      radius: 3
+      n_bits: 2048
+      use_counts: true
+  - name: rdkit2d
+    params: {}
+  - name: conj_proxy
+    params:
+      L_cut: 4
+
+model:
+  name: random_forest
+  params:
+    n_estimators: 200
+    # Parameters below will be tuned by Optuna
+    max_depth: null  # None = no limit
+    min_samples_split: 2
+    min_samples_leaf: 1
+    max_features: "sqrt"  # sqrt, log2, or number
+    max_samples: 0.8  # Use 80% of samples for each tree (important for large-scale data)
+    bootstrap: true
+    n_jobs: -1  # Use all available cores
+    class_weight: "balanced"  # Handle imbalanced data
+
+imbalance:
+  use_pos_weight: true
+  pos_weight_from_data: true
+  # Note: RandomForest uses class_weight parameter, pos_weight will be converted
+
+plates:
+  normalize: false
+
+task: y_fluo_any
+metrics:
+  - roc_auc
+  - pr_auc
+
+early_stopping_rounds: 50  # Not used by RandomForest (no early stopping)
+early_stopping_metric: roc_auc
+
+log_level: INFO
+
+# Optuna hyperparameter tuning configuration
+optuna:
+  enable: true
+  n_trials: 50  # Fewer trials for RandomForest (slower than gradient boosting)
+  timeout: null  # No timeout (in seconds)
+  study_name: full_randomforest_tuning
+
+  # RandomForest parameters to tune
+  # Any parameter not listed here will use the fixed value from model.params
+  randomforest_params:
+    n_estimators:
+      type: int
+      min: 100
+      max: 500
+    max_depth:
+      type: int
+      min: 5
+      max: 20
+      # Note: Use null for no limit, but Optuna can't tune null, so we tune depth
+    min_samples_split:
+      type: int
+      min: 2
+      max: 20
+    min_samples_leaf:
+      type: int
+      min: 1
+      max: 10
+    max_features:
+      type: categorical
+      choices: ["sqrt", "log2", 0.3, 0.5, 0.7]
+    max_samples:
+      type: float
+      min: 0.5
+      max: 1.0
+      # For large-scale data, using max_samples < 1.0 can significantly speed up training
+  pos_weight_params:
+    pos_weight_multiplier:
+      type: float
+      min: 0.5
+      max: 2.0
+

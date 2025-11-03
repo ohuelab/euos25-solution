@@ -8,24 +8,27 @@ scaffold_min_size: 10
 
 # All feature types
 featurizers:
-  - name: ecfp
-    params:
-      radius: 3
-      n_bits: 2048
-      use_counts: true
-  - name: rdkit2d
-    params: {}
+  # - name: ecfp
+  #   params:
+  #     radius: 3
+  #     n_bits: 2048
+  #     use_counts: true
+  # - name: rdkit2d
+  #   params: {}
   - name: mordred
     params:
       ignore_3d: true
-  - name: chemeleon
-    params:
-      chemeleon_path: "data/pretrained/chemeleon_mp.pt"
-      aggregation: "mean"
-      device: null  # Auto-detect (cuda/mps/cpu)
-  - name: conj_proxy
-    params:
-      L_cut: 4
+  # - name: chemeleon
+  #   params:
+  #     chemeleon_path: "data/pretrained/chemeleon_mp.pt"
+  #     aggregation: "mean"
+  #     device: null  # Auto-detect (cuda/mps/cpu)
+  # - name: conj_proxy
+  #   params:
+  #     L_cut: 4
+  # - name: chemberta
+  #   params:
+  #     pooling: mean
 
 model:
   name: lgbm

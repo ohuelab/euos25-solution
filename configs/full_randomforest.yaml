@@ -1,0 +1,56 @@
+seed: 42
+folds: 5
+scaffold_min_size: 10
+
+featurizers:
+  - name: ecfp
+    params:
+      radius: 3
+      n_bits: 2048
+      use_counts: true
+  - name: rdkit2d
+    params: {}
+  - name: conj_proxy
+    params:
+      L_cut: 4
+
+model:
+  name: random_forest
+  params:
+    n_estimators: 200
+    max_depth: null  # None = no limit
+    min_samples_split: 2
+    min_samples_leaf: 1
+    max_features: "sqrt"
+    max_samples: 0.8  # Use 80% of samples for each tree (important for large-scale data)
+    bootstrap: true
+    n_jobs: -1  # Use all available cores
+    class_weight: "balanced"  # Handle imbalanced data
+
+imbalance:
+  use_pos_weight: true
+  pos_weight_from_data: true
+
+plates:
+  normalize: false
+
+task: y_fluo_any
+metrics:
+  - roc_auc
+  - pr_auc
+
+early_stopping_rounds: 50  # Not used by RandomForest (no early stopping)
+early_stopping_metric: roc_auc
+
+log_level: INFO
+
+# Optuna hyperparameter tuning configuration
+optuna:
+  enable: false  # Set to true to enable hyperparameter tuning
+  n_trials: 50
+  timeout: null
+  study_name: full_randomforest_tuning
+
+  randomforest_params: {}  # Add parameters to tune here
+  pos_weight_params: {}  # Add pos_weight_multiplier tuning here if needed
+

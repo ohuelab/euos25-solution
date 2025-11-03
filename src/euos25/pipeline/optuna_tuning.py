@@ -12,6 +12,7 @@ import pandas as pd
 from euos25.config import Config
 from euos25.models.lgbm import LGBMClassifier
 from euos25.models.catboost import CatBoostClassifier
+from euos25.models.random_forest import RandomForestClassifierModel
 from euos25.pipeline.features import (
     FEATURE_GROUP_MAPPING,
     filter_feature_groups,
@@ -39,6 +40,15 @@ DEFAULT_PARAMS = {
     "colsample_bylevel": 0.8,
     "min_data_in_leaf": 20,
     "l2_leaf_reg": 3.0,
+    # RandomForest defaults
+    "max_depth": None,
+    "min_samples_split": 2,
+    "min_samples_leaf": 1,
+    "max_features": "sqrt",
+    "max_samples": None,
+    "bootstrap": True,
+    "class_weight": "balanced",
+    "n_jobs": -1,
     # Common defaults
     "focal_alpha": 0.25,
     "focal_gamma": 2.0,
@@ -168,6 +178,30 @@ def suggest_all_params(
             else:
                 # Use fixed value
                 params[param_name] = get_fixed_value(param_name, config)
+    elif model_name == "random_forest":
+        # Suggest RandomForest parameters (tuned ones from config.optuna.randomforest_params)
+        randomforest_param_names = [
+            "n_estimators",
+            "max_depth",
+            "min_samples_split",
+            "min_samples_leaf",
+            "max_features",
+            "max_samples",
+        ]
+        for param_name in randomforest_param_names:
+            if param_name in config.optuna.randomforest_params:
+                # Tune this parameter
+                params[param_name] = suggest_param(
+                    trial, param_name, config.optuna.randomforest_params[param_name]
+                )
+            else:
+                # Use fixed value
+                params[param_name] = get_fixed_value(param_name, config)
+        # Fixed parameters for RandomForest
+        if "n_jobs" not in params:
+            params["n_jobs"] = get_fixed_value("n_jobs", config)
+        if "bootstrap" not in params:
+            params["bootstrap"] = get_fixed_value("bootstrap", config)
     else:
         # Generic parameters for other models
         common_param_names = ["learning_rate", "max_depth"]
@@ -245,9 +279,17 @@ def suggest_all_params(
             param_name = f"use_{group_name}"
             params[param_name] = True
 
-    # Fixed parameters
-    params["n_estimators"] = config.model.params.get("n_estimators", 1000)
-    params["early_stopping_rounds"] = config.early_stopping_rounds
+    # Fixed parameters (model-specific)
+    if model_name != "random_forest":
+        # RandomForest handles n_estimators differently (can be tuned)
+        params["n_estimators"] = config.model.params.get("n_estimators", 1000)
+        params["early_stopping_rounds"] = config.early_stopping_rounds
+    else:
+        # For RandomForest, n_estimators might be tuned, so check
+        if "n_estimators" not in params:
+            params["n_estimators"] = config.model.params.get("n_estimators", 100)
+        # RandomForest doesn't have early stopping
+        params["early_stopping_rounds"] = None
 
     return params
 
@@ -424,6 +466,10 @@ def objective(
         elif model_name == "catboost":
             model = CatBoostClassifier(**all_params)
             model.fit(X_train, y_train, eval_set=(X_valid, y_valid))
+        elif model_name == "random_forest":
+            # RandomForest doesn't use eval_set for early stopping
+            model = RandomForestClassifierModel(**all_params)
+            model.fit(X_train, y_train, eval_set=None)
         else:
             raise ValueError(f"Unsupported model for Optuna tuning: {model_name}")
 

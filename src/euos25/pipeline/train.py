@@ -11,6 +11,7 @@ from euos25.config import Config
 from euos25.models.base import ClfModel
 from euos25.models.lgbm import LGBMClassifier
 from euos25.models.catboost import CatBoostClassifier
+from euos25.models.random_forest import RandomForestClassifierModel
 from euos25.models import ChemPropModel, CHEMPROP_AVAILABLE
 from euos25.pipeline.features import (
     filter_feature_groups,
@@ -62,6 +63,8 @@ def create_model(config: Config, checkpoint_dir: Optional[str] = None) -> ClfMod
         return LGBMClassifier(**model_params)
     elif model_name == "catboost":
         return CatBoostClassifier(**model_params)
+    elif model_name == "random_forest":
+        return RandomForestClassifierModel(**model_params)
     elif model_name == "chemprop":
         if not CHEMPROP_AVAILABLE:
             raise ImportError(
@@ -153,6 +156,19 @@ def train_fold(
                 for metric_name, score in metrics.items():
                     logger.info(f"  {metric_name}: {score:.6f}")
                 return model, metrics
+        elif config.model.name == "random_forest":
+            model_path = model_dir / "model.pkl"
+            if model_path.exists():
+                logger.info(f"  Model already exists at {model_dir}, skipping training")
+                from euos25.models.random_forest import RandomForestClassifierModel
+                model = RandomForestClassifierModel.load(str(model_dir))
+                # Predict on validation to compute metrics
+                y_pred = model.predict_proba(X_valid)
+                y_pred_proba = y_pred
+                metrics = calc_metrics(y_valid, y_pred_proba, metrics=config.metrics)
+                for metric_name, score in metrics.items():
+                    logger.info(f"  {metric_name}: {score:.6f}")
+                return model, metrics
         elif config.model.name == "chemprop":
             # For ChemProp, check if model exists (can be file or directory)
             # trainer.save_checkpoint() saves as a file
@@ -210,8 +226,11 @@ def train_fold(
     if config.model.name == "chemprop":
         # ChemProp uses X_val and y_val instead of eval_set
         model.fit(X_train, y_train, X_val=X_valid, y_val=y_valid, resume_from_checkpoint=resume_ckpt)
+    elif config.model.name == "random_forest":
+        # RandomForest doesn't use eval_set (no early stopping)
+        model.fit(X_train, y_train, eval_set=None)
     else:
-        # LGBM and others use eval_set
+        # LGBM and CatBoost use eval_set
         model.fit(
             X_train,
             y_train,
@@ -438,6 +457,15 @@ def train_full(
             logger.info("=" * 50)
             from euos25.models.catboost import CatBoostClassifier
             return CatBoostClassifier.load(str(full_model_dir))
+    elif config.model.name == "random_forest":
+        model_path = full_model_dir / "model.pkl"
+        if model_path.exists():
+            logger.info("=" * 50)
+            logger.info("Full model already exists, skipping training")
+            logger.info(f"  Model path: {full_model_dir}")
+            logger.info("=" * 50)
+            from euos25.models.random_forest import RandomForestClassifierModel
+            return RandomForestClassifierModel.load(str(full_model_dir))
     elif config.model.name == "chemprop":
         # For ChemProp, check if model exists (can be file or directory)
         if full_model_dir.exists() and (full_model_dir.is_file() or full_model_dir.is_dir()):
@@ -548,6 +576,12 @@ def train_full(
 
         # Restore original n_estimators (for metadata consistency)
         model.params["n_estimators"] = original_n_estimators
+    elif config.model.name == "random_forest":
+        # RandomForest doesn't adjust n_estimators based on data size
+        # Just train on full data
+        logger.info(f"Training with {model.params['n_estimators']} trees")
+        logger.info("  Training on full data (no validation set)")
+        model.fit(X_full, y_full, eval_set=None)
     elif config.model.name == "chemprop":
         # For ChemProp, use max_epochs from config (no adjustment needed)
         logger.info(f"  Training with max_epochs={model.params.get('max_epochs', 'default')}")

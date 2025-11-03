@@ -108,6 +108,7 @@ class OptunaConfig(BaseModel):
     # Parameter search configurations by category
     lgbm_params: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     catboost_params: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    randomforest_params: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     imbalance_params: Dict[str, Dict[str, Any]] = Field(default_factory=dict)  # use_pos_weight, use_focal_loss
     focal_params: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     pos_weight_params: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
