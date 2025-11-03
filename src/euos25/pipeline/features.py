@@ -37,6 +37,18 @@ FEATURE_GROUP_MAPPING = {
     "conj_proxy": "custom",
 }
 
+# Map of group name variants (with aggregation suffixes) to base group names
+# This handles cases like 'chemeleon_mean' -> 'chemeleon' when features were
+# created with aggregation-specific names
+GROUP_NAME_VARIANTS = {
+    "chemeleon_mean": "chemeleon",
+    "chemeleon_sum": "chemeleon",
+    "chemeleon_norm": "chemeleon",
+    "chemberta_mean": "chemberta",
+    "chemberta_sum": "chemberta",
+    "chemberta_norm": "chemberta",
+}
+
 
 def create_featurizer(config: FeaturizerConfig) -> Featurizer:
     """Create featurizer from configuration.
@@ -92,6 +104,25 @@ def build_features(
     """
     logger.info(f"Building features with {len(featurizers)} featurizers")
 
+    # Validate input DataFrame
+    if df.empty:
+        raise ValueError(
+            f"Input DataFrame is empty. Cannot generate features from empty data."
+        )
+
+    if smiles_col not in df.columns:
+        available_cols = list(df.columns)
+        raise ValueError(
+            f"Required column '{smiles_col}' not found in input DataFrame. "
+            f"Available columns: {available_cols}. "
+            f"DataFrame shape: {df.shape}"
+        )
+
+    logger.info(
+        f"Input DataFrame: {len(df)} rows, {len(df.columns)} columns. "
+        f"Columns: {list(df.columns)}"
+    )
+
     # If no featurizers, return DataFrame with just SMILES for models like ChemProp
     if not featurizers:
         logger.info("No featurizers specified - creating SMILES-only DataFrame for graph-based models")
@@ -106,22 +137,55 @@ def build_features(
 
     # Start with ID index
     feature_dfs = []
+    failed_featurizers = []
 
     # Generate features from each featurizer
     for featurizer in featurizers:
         logger.info(f"Applying featurizer: {featurizer.name}")
-        feat_df = featurizer.transform(df, smiles_col=smiles_col)
+        try:
+            feat_df = featurizer.transform(df, smiles_col=smiles_col)
 
-        if not feat_df.empty:
-            # Add group prefix to column names for identification
-            group_name = FEATURE_GROUP_MAPPING.get(featurizer.name, featurizer.name)
-            feat_df.columns = [f"{group_name}__{col}" for col in feat_df.columns]
-            feature_dfs.append(feat_df)
-        else:
-            logger.warning(f"Featurizer {featurizer.name} produced no features")
+            # Check both empty and column count explicitly
+            # A DataFrame with no columns but with rows would have empty=False
+            # but would still not have any features
+            if not feat_df.empty and len(feat_df.columns) > 0:
+                # Add group prefix to column names for identification
+                group_name = FEATURE_GROUP_MAPPING.get(featurizer.name, featurizer.name)
+                feat_df.columns = [f"{group_name}__{col}" for col in feat_df.columns]
+                feature_dfs.append(feat_df)
+                logger.info(
+                    f"Featurizer {featurizer.name} generated {len(feat_df.columns)} features "
+                    f"for {len(feat_df)} samples"
+                )
+            else:
+                failed_featurizers.append(featurizer.name)
+                logger.warning(
+                    f"Featurizer {featurizer.name} produced no features. "
+                    f"Result shape: {feat_df.shape}, empty: {feat_df.empty}, "
+                    f"columns: {len(feat_df.columns)}"
+                )
+        except Exception as e:
+            failed_featurizers.append(featurizer.name)
+            logger.error(
+                f"Featurizer {featurizer.name} failed with error: {e}",
+                exc_info=True
+            )
 
     if not feature_dfs:
-        raise ValueError("No features were generated")
+        error_msg = (
+            f"No features were generated. All {len(featurizers)} featurizers failed or produced empty results.\n"
+            f"Failed featurizers: {failed_featurizers}\n"
+            f"Input DataFrame: {len(df)} rows, columns: {list(df.columns)}\n"
+            f"SMILES column: {smiles_col}, first few SMILES: {df[smiles_col].head(3).tolist()}"
+        )
+        raise ValueError(error_msg)
+
+    # Log summary of successful featurizers
+    if failed_featurizers:
+        logger.warning(
+            f"Some featurizers failed: {failed_featurizers}. "
+            f"Successfully generated features from {len(feature_dfs)} out of {len(featurizers)} featurizers."
+        )
 
     # Concatenate all features
     features = pd.concat(feature_dfs, axis=1)
@@ -130,7 +194,7 @@ def build_features(
     if id_col in df.columns:
         features.index = df[id_col].values
 
-    logger.info(f"Total features generated: {len(features.columns)}")
+    logger.info(f"Total features generated: {len(features.columns)} from {len(feature_dfs)} featurizers")
     return features
 
 
@@ -141,13 +205,15 @@ def get_available_feature_groups(features: pd.DataFrame) -> set[str]:
         features: DataFrame with features (columns have group prefixes like 'ecfp4__...')
 
     Returns:
-        Set of available feature group names
+        Set of available feature group names (normalized to base group names)
     """
     groups = set()
     for col in features.columns:
         if "__" in col:
             group = col.split("__")[0]
-            groups.add(group)
+            # Normalize group name if it has a known variant
+            normalized_group = GROUP_NAME_VARIANTS.get(group, group)
+            groups.add(normalized_group)
         else:
             # If no prefix, treat as a special group
             groups.add("unknown")
@@ -240,7 +306,10 @@ def filter_feature_groups(
         # Extract group prefix
         if "__" in col:
             group = col.split("__")[0]
-            if settings.get(group, True):  # Default to True if group not found
+            # Normalize group name if it has a known variant
+            normalized_group = GROUP_NAME_VARIANTS.get(group, group)
+            # Check both the original group name and normalized name
+            if settings.get(normalized_group, settings.get(group, True)):  # Default to True if group not found
                 selected_cols.append(col)
         else:
             # If no prefix, include by default
@@ -253,6 +322,105 @@ def filter_feature_groups(
 
     logger.info(f"Filtered features: {len(filtered_features.columns)} features from {len(features.columns)} total")
     logger.info(f"Active groups: {[g for g, active in settings.items() if active]}")
+
+    return filtered_features
+
+
+def filter_low_quality_features(
+    features: pd.DataFrame,
+    max_nan_ratio: float = 0.99,
+    min_variance: float = 1e-6,
+    min_unique_ratio: float = 0.01,
+    low_variance_threshold: float = 0.99,
+) -> pd.DataFrame:
+    """Filter out low-quality feature columns.
+
+    Removes features that are:
+    - Mostly NaN (above max_nan_ratio)
+    - Low variance (below min_variance)
+    - Mostly the same value (unique ratio below min_unique_ratio or
+      one value accounts for more than low_variance_threshold of samples)
+
+    Args:
+        features: DataFrame with features
+        max_nan_ratio: Maximum ratio of NaN values allowed (default: 0.99)
+        min_variance: Minimum variance threshold (default: 1e-6)
+        min_unique_ratio: Minimum ratio of unique values (default: 0.01)
+        low_variance_threshold: Threshold for detecting mostly constant features.
+            If a single value accounts for more than this ratio, the feature is removed.
+            (default: 0.99)
+
+    Returns:
+        DataFrame with low-quality features removed
+    """
+    logger.info(f"Filtering low-quality features from {len(features.columns)} columns")
+
+    initial_count = len(features.columns)
+    columns_to_keep = []
+    stats = {
+        'high_nan': [],
+        'low_variance': [],
+        'low_unique_ratio': [],
+        'mostly_constant': [],
+    }
+
+    for col in features.columns:
+        col_data = features[col]
+
+        # Check NaN ratio
+        nan_ratio = col_data.isna().sum() / len(col_data)
+        if nan_ratio > max_nan_ratio:
+            stats['high_nan'].append(col)
+            continue
+
+        # Drop NaN for variance calculation
+        col_data_no_nan = col_data.dropna()
+
+        if len(col_data_no_nan) == 0:
+            # All NaN after dropping
+            stats['high_nan'].append(col)
+            continue
+
+        # Check variance
+        variance = col_data_no_nan.var()
+        if variance < min_variance:
+            stats['low_variance'].append(col)
+            continue
+
+        # Check unique value ratio
+        unique_ratio = col_data_no_nan.nunique() / len(col_data_no_nan)
+        if unique_ratio < min_unique_ratio:
+            stats['low_unique_ratio'].append(col)
+            continue
+
+        # Check if mostly constant (one value dominates)
+        value_counts = col_data_no_nan.value_counts(normalize=True)
+        if len(value_counts) > 0 and value_counts.iloc[0] > low_variance_threshold:
+            stats['mostly_constant'].append(col)
+            continue
+
+        columns_to_keep.append(col)
+
+    # Log statistics
+    filtered_count = initial_count - len(columns_to_keep)
+    logger.info(
+        f"Filtered {filtered_count} low-quality features: "
+        f"high NaN: {len(stats['high_nan'])}, "
+        f"low variance: {len(stats['low_variance'])}, "
+        f"low unique ratio: {len(stats['low_unique_ratio'])}, "
+        f"mostly constant: {len(stats['mostly_constant'])}"
+    )
+
+    if filtered_count > 0:
+        logger.info(f"Kept {len(columns_to_keep)}/{initial_count} features")
+        # Log a few examples of filtered features (first 5 of each type)
+        for stat_type, cols in stats.items():
+            if cols:
+                logger.debug(
+                    f"Examples of {stat_type} features: {cols[:5]}"
+                )
+
+    filtered_features = features[columns_to_keep]
 
     return filtered_features
 
@@ -286,6 +454,13 @@ def build_features_from_config(
 
         # Get available groups from existing features
         available_groups = get_available_feature_groups(existing_features)
+
+        # Log for debugging
+        logger.info(
+            f"Checking feature groups: required={required_group_names}, "
+            f"available={available_groups}, "
+            f"config featurizers={[f.name for f in config.featurizers]}"
+        )
 
         # Find missing groups
         missing_groups = required_group_names - available_groups

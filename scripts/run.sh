@@ -225,6 +225,7 @@ for i in "${!TASKS[@]}"; do
   fi
 
   # Build training features
+  # Note: build-features command will add missing feature groups even if file exists
   echo ""
   echo "Step 2c: Building training features for $TASK..."
   if [ "$FORCE" = true ] || [ ! -f "$FEATURE_FILE" ]; then
@@ -233,7 +234,11 @@ for i in "${!TASKS[@]}"; do
       --output "$FEATURE_FILE" \
       --config $CONF
   else
-    echo "  Skipping: $FEATURE_FILE already exists"
+    echo "  File exists, but checking for missing feature groups..."
+    uv run -m euos25.cli build-features \
+      --input "$PREPARED_FILE" \
+      --output "$FEATURE_FILE" \
+      --config $CONF
   fi
 
   # Train models
@@ -279,6 +284,7 @@ for i in "${!TASKS[@]}"; do
 done
 
 # Step 3: Build test features (shared features for all tasks)
+# Note: build-features command will add missing feature groups even if file exists
 echo ""
 echo "Step 3: Building test features..."
 if [ "$FORCE" = true ] || [ ! -f "$FEATURES_TEST" ]; then
@@ -287,7 +293,11 @@ if [ "$FORCE" = true ] || [ ! -f "$FEATURES_TEST" ]; then
     --output $FEATURES_TEST \
     --config $CONF
 else
-  echo "  Skipping: $FEATURES_TEST already exists"
+  echo "  File exists, but checking for missing feature groups..."
+  uv run -m euos25.cli build-features \
+    --input $PREPARED_TEST \
+    --output $FEATURES_TEST \
+    --config $CONF
 fi
 
 # Step 4: Generate test predictions for each task

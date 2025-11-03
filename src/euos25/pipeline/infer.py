@@ -10,7 +10,11 @@ import pandas as pd
 from euos25.config import Config
 from euos25.models.lgbm import LGBMClassifier
 from euos25.models import ChemPropModel, CHEMPROP_AVAILABLE
-from euos25.pipeline.features import filter_feature_groups, get_feature_groups_from_config
+from euos25.pipeline.features import (
+    filter_feature_groups,
+    filter_low_quality_features,
+    get_feature_groups_from_config,
+)
 from euos25.utils.io import load_json, load_parquet, save_csv
 
 logger = logging.getLogger(__name__)
@@ -98,6 +102,16 @@ def predict_oof(
                     f"All feature groups are disabled in config. "
                     f"At least one group must be enabled. Settings: {group_settings}"
                 )
+
+    # Filter low-quality features (same as training)
+    # Note: This ensures consistency between training and inference
+    features = filter_low_quality_features(
+        features,
+        max_nan_ratio=0.99,  # 99%以上NaNの特徴量を除外
+        min_variance=1e-6,
+        min_unique_ratio=0.01,  # ユニーク値が1%未満の特徴量を除外
+        low_variance_threshold=0.99,  # 99%以上が同じ値の特徴量を除外
+    )
 
     # Initialize predictions array
     predictions = np.zeros(len(features))
@@ -208,6 +222,16 @@ def predict_test(
                     f"All feature groups are disabled in config. "
                     f"At least one group must be enabled. Settings: {group_settings}"
                 )
+
+    # Filter low-quality features (same as training)
+    # Note: This ensures consistency between training and inference
+    features = filter_low_quality_features(
+        features,
+        max_nan_ratio=0.99,  # 99%以上NaNの特徴量を除外
+        min_variance=1e-6,
+        min_unique_ratio=0.01,  # ユニーク値が1%未満の特徴量を除外
+        low_variance_threshold=0.99,  # 99%以上が同じ値の特徴量を除外
+    )
 
     # Use task_name override if provided, otherwise use config.task
     actual_task_name = task_name if task_name is not None else config.task

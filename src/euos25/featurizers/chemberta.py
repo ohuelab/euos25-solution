@@ -33,6 +33,7 @@ class ChemBERTaFeaturizer(BaseFeaturizer):
         device: Optional[str] = None,
         batch_size: int = 32,
         name: Optional[str] = None,
+        n_jobs: int = 1,
     ):
         """Initialize ChemBERTa featurizer.
 
@@ -43,6 +44,7 @@ class ChemBERTaFeaturizer(BaseFeaturizer):
             device: Device to use ('cpu', 'cuda', 'mps'). Auto-detect if None.
             batch_size: Batch size for inference
             name: Featurizer name. If None, will be set to 'chemberta_{pooling}'
+            n_jobs: Number of parallel jobs for tokenization. If 1, no parallelization. -1 means use all CPUs.
         """
         # Set name based on pooling if not provided
         if name is None:
@@ -55,11 +57,13 @@ class ChemBERTaFeaturizer(BaseFeaturizer):
             max_length=max_length,
             device=device,
             batch_size=batch_size,
+            n_jobs=n_jobs,
         )
         self.model_name = model_name
         self.pooling = pooling
         self.max_length = max_length
         self.batch_size = batch_size
+        self.n_jobs = n_jobs
 
         # Set device
         if device is None:
@@ -154,25 +158,55 @@ class ChemBERTaFeaturizer(BaseFeaturizer):
         smiles_list = df[smiles_col].tolist()
         logger.info(f"Extracting ChemBERTa embeddings for {len(smiles_list)} molecules")
 
-        # Tokenize SMILES
-        valid_indices = []
-        tokenized_inputs = []
+        # Determine number of jobs for tokenization
+        if self.n_jobs == -1:
+            import multiprocessing
+            n_jobs = multiprocessing.cpu_count()
+        else:
+            n_jobs = self.n_jobs
 
-        for idx, smi in enumerate(smiles_list):
-            try:
-                # ChemBERTa tokenizer expects SMILES as input
-                # Some models may need special formatting
-                encoded = self.tokenizer(
-                    smi,
-                    max_length=self.max_length,
-                    padding="max_length",
-                    truncation=True,
-                    return_tensors="pt",
-                )
-                tokenized_inputs.append(encoded)
-                valid_indices.append(idx)
-            except Exception as e:
-                logger.warning(f"Error tokenizing SMILES at index {idx}: {smi}, {e}")
+        # Tokenize SMILES (parallel or sequential)
+        if n_jobs == 1:
+            # Sequential tokenization
+            valid_indices = []
+            tokenized_inputs = []
+            for idx, smi in enumerate(smiles_list):
+                try:
+                    # ChemBERTa tokenizer expects SMILES as input
+                    # Some models may need special formatting
+                    encoded = self.tokenizer(
+                        smi,
+                        max_length=self.max_length,
+                        padding="max_length",
+                        truncation=True,
+                        return_tensors="pt",
+                    )
+                    tokenized_inputs.append(encoded)
+                    valid_indices.append(idx)
+                except Exception as e:
+                    logger.warning(f"Error tokenizing SMILES at index {idx}: {smi}, {e}")
+        else:
+            # Parallel tokenization
+            from multiprocessing import Pool
+            from functools import partial
+
+            # Create worker function for tokenization
+            # Pass model_name and max_length to recreate tokenizer in worker
+            worker_fn = partial(_chemberta_tokenize_worker,
+                              model_name=self.model_name,
+                              max_length=self.max_length)
+
+            # Process in parallel
+            with Pool(n_jobs) as pool:
+                results = pool.map(worker_fn, smiles_list)
+
+            # Collect valid results
+            valid_indices = []
+            tokenized_inputs = []
+            for idx, result in enumerate(results):
+                if result is not None:
+                    tokenized_inputs.append(result)
+                    valid_indices.append(idx)
 
         if len(tokenized_inputs) == 0:
             logger.warning("No valid SMILES found")
@@ -222,6 +256,34 @@ class ChemBERTaFeaturizer(BaseFeaturizer):
         logger.info(f"Extracted embeddings shape: {embeddings.shape}")
         logger.info(f"Generated {len(feature_names)} {self.name} features for {len(result_df)} samples")
         return result_df
+
+
+def _chemberta_tokenize_worker(smiles: str, model_name: str, max_length: int) -> Optional[dict]:
+    """Worker function for parallel ChemBERTa tokenization.
+
+    Args:
+        smiles: SMILES string
+        model_name: Hugging Face model name
+        max_length: Maximum sequence length
+
+    Returns:
+        Tokenized input dictionary or None if invalid
+    """
+    try:
+        # Recreate tokenizer in worker (needed for multiprocessing)
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+        # Tokenize SMILES
+        encoded = tokenizer(
+            smiles,
+            max_length=max_length,
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt",
+        )
+        return encoded
+    except Exception:
+        return None
 
 
 def create_chemberta_featurizer(

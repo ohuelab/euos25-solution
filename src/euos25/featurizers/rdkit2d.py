@@ -1,6 +1,7 @@
 """RDKit 2D molecular descriptors featurizer."""
 
 import logging
+from functools import partial
 from typing import List, Optional
 
 import numpy as np
@@ -24,15 +25,18 @@ class RDKit2DFeaturizer(BaseFeaturizer):
         self,
         name: str = "rdkit2d",
         descriptor_names: Optional[List[str]] = None,
+        n_jobs: int = -1,
     ):
         """Initialize RDKit 2D featurizer.
 
         Args:
             name: Feature name prefix
             descriptor_names: List of descriptor names to compute (None = all)
+            n_jobs: Number of parallel jobs. If 1, no parallelization. -1 means use all CPUs.
         """
-        super().__init__(name=name, descriptor_names=descriptor_names)
+        super().__init__(name=name, descriptor_names=descriptor_names, n_jobs=n_jobs)
         self.descriptor_names = descriptor_names
+        self.n_jobs = n_jobs
 
         # Get all available descriptors if not specified
         if self.descriptor_names is None:
@@ -90,17 +94,45 @@ class RDKit2DFeaturizer(BaseFeaturizer):
         Returns:
             DataFrame with descriptor feature columns
         """
-        logger.info(f"Generating {self.name} features using RDKit 2D descriptors ({len(self.descriptor_names)} descriptors)")
+        logger.info(f"Generating {self.name} features using RDKit 2D descriptors ({len(self.descriptor_names)} descriptors, n_jobs={self.n_jobs})")
 
-        # Generate descriptors
-        desc_list = []
-        valid_indices = []
+        smiles_list = df[smiles_col].tolist()
 
-        for idx, smiles in enumerate(df[smiles_col]):
-            desc = self._smiles_to_descriptors(smiles)
-            if desc is not None:
-                desc_list.append(desc)
-                valid_indices.append(idx)
+        # Determine number of jobs
+        if self.n_jobs == -1:
+            import multiprocessing
+            n_jobs = multiprocessing.cpu_count()
+        else:
+            n_jobs = self.n_jobs
+
+        # Generate descriptors (parallel or sequential)
+        if n_jobs == 1:
+            # Sequential processing
+            desc_list = []
+            valid_indices = []
+            for idx, smiles in enumerate(smiles_list):
+                desc = self._smiles_to_descriptors(smiles)
+                if desc is not None:
+                    desc_list.append(desc)
+                    valid_indices.append(idx)
+        else:
+            # Parallel processing
+            from multiprocessing import Pool
+
+            # Create worker function
+            worker_fn = partial(_rdkit2d_worker, descriptor_names=self.descriptor_names)
+
+            # Process in parallel
+            with Pool(n_jobs) as pool:
+                results = pool.map(worker_fn, smiles_list)
+
+            # Collect valid results
+            desc_list = []
+            valid_indices = []
+            for idx, desc in enumerate(results):
+                if desc is not None:
+                    desc_list.append(desc)
+                    valid_indices.append(idx)
 
         if not desc_list:
             logger.warning("No valid descriptors generated")
@@ -121,6 +153,42 @@ class RDKit2DFeaturizer(BaseFeaturizer):
 
         logger.info(f"Generated {len(columns)} {self.name} features for {len(result_df)} samples")
         return result_df
+
+
+def _rdkit2d_worker(smiles: str, descriptor_names: List[str]) -> Optional[np.ndarray]:
+    """Worker function for parallel RDKit 2D descriptor computation.
+
+    Args:
+        smiles: SMILES string
+        descriptor_names: List of descriptor names to compute
+
+    Returns:
+        Descriptor array or None if invalid
+    """
+    try:
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            return None
+
+        descriptors = []
+        for desc_name in descriptor_names:
+            try:
+                # Get descriptor function
+                desc_fn = getattr(Descriptors, desc_name)
+                value = desc_fn(mol)
+
+                # Handle inf/nan values
+                if np.isnan(value) or np.isinf(value):
+                    value = 0.0
+
+                descriptors.append(value)
+            except Exception:
+                descriptors.append(0.0)
+
+        return np.array(descriptors, dtype=np.float32)
+
+    except Exception:
+        return None
 
 
 def get_common_descriptors() -> List[str]:

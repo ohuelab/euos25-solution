@@ -80,6 +80,8 @@ optuna:
       type: float
       min: 0.5
       max: 2.0
+  feature_groups:
+    tune: false
 
 # Note: Chemeleon foundation model weights (chemeleon_mp.pt) must be downloaded separately
 # See: https://chemprop.readthedocs.io/en/latest/chemeleon_foundation_finetuning.html

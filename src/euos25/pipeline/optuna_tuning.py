@@ -14,6 +14,7 @@ from euos25.models.lgbm import LGBMClassifier
 from euos25.pipeline.features import (
     FEATURE_GROUP_MAPPING,
     filter_feature_groups,
+    filter_low_quality_features,
     get_available_feature_groups,
     get_feature_groups_from_config,
 )
@@ -244,14 +245,30 @@ def objective(
         actual_feature_groups = get_available_feature_groups(features)
         available_groups = config_groups & actual_feature_groups
 
-        logger.debug(
+        logger.info(
             f"Trial {trial.number}: Config groups: {config_groups}, "
+            f"Config featurizers: {[f.name for f in config.featurizers]}, "
             f"Actual groups in features: {actual_feature_groups}, "
             f"Using: {available_groups}"
         )
+
+        # Warn if config groups are not available in features
+        if available_groups != config_groups:
+            missing_in_features = config_groups - actual_feature_groups
+            if missing_in_features:
+                logger.warning(
+                    f"Trial {trial.number}: Config specifies groups {config_groups} but "
+                    f"features only contain {actual_feature_groups}. "
+                    f"Missing groups: {missing_in_features}. "
+                    f"Will use only available groups: {available_groups}"
+                )
     else:
         # No featurizers in config (e.g., ChemProp), detect from features
         available_groups = get_available_feature_groups(features)
+        logger.info(
+            f"Trial {trial.number}: No featurizers in config, "
+            f"detected from features: {available_groups}"
+        )
 
     # Suggest all parameters (pass available groups for dynamic handling)
     all_params = suggest_all_params(trial, config, available_groups=available_groups)
@@ -299,6 +316,22 @@ def objective(
             f"Trial {trial.number}: No features remain after filtering. "
             f"Group settings: {group_settings}, "
             f"Available groups in features: {get_available_feature_groups(features)}"
+        )
+        return 0.0
+
+    # Filter low-quality features (high NaN, low variance, mostly constant)
+    filtered_features = filter_low_quality_features(
+        filtered_features,
+        max_nan_ratio=0.99,  # 99%以上NaNの特徴量を除外
+        min_variance=1e-6,
+        min_unique_ratio=0.01,  # ユニーク値が1%未満の特徴量を除外
+        low_variance_threshold=0.99,  # 99%以上が同じ値の特徴量を除外
+    )
+
+    # Check again after low-quality filtering
+    if len(filtered_features.columns) == 0:
+        logger.warning(
+            f"Trial {trial.number}: No features remain after low-quality filtering."
         )
         return 0.0
 
