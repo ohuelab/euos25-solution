@@ -227,7 +227,19 @@ class RandomForestClassifierModel(BaseClfModel):
 
         # Ensure feature order matches training
         if self.feature_names:
-            X = X[self.feature_names]
+            # Check which features are missing
+            missing_features = set(self.feature_names) - set(X.columns)
+            if missing_features:
+                logger.warning(
+                    f"Missing {len(missing_features)} features in prediction data. "
+                    f"First few missing: {list(missing_features)[:5]}. "
+                    "Filling with zeros."
+                )
+                # Create DataFrame with all required features, filling missing ones with zeros
+                X = X.reindex(columns=self.feature_names, fill_value=0.0)
+            else:
+                # All features present, just reorder
+                X = X[self.feature_names]
 
         # RandomForest returns probabilities for both classes, extract positive class
         preds = self.model.predict_proba(X.values)[:, 1]
