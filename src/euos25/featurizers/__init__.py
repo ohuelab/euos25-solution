@@ -12,10 +12,20 @@ except ImportError:
     CHEMELEON_AVAILABLE = False
     ChemeleonFeaturizer = None
 
+try:
+    from euos25.featurizers.chemberta import ChemBERTaFeaturizer
+
+    CHEMBERTA_AVAILABLE = True
+except ImportError:
+    CHEMBERTA_AVAILABLE = False
+    ChemBERTaFeaturizer = None
+
 __all__ = [
     "ECFPFeaturizer",
     "RDKit2DFeaturizer",
     "MordredFeaturizer",
     "ChemeleonFeaturizer",
     "CHEMELEON_AVAILABLE",
+    "ChemBERTaFeaturizer",
+    "CHEMBERTA_AVAILABLE",
 ]

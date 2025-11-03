@@ -7,12 +7,21 @@ import pandas as pd
 
 from euos25.config import Config, FeaturizerConfig
 from euos25.featurizers.base import Featurizer
-from euos25.featurizers.chemeleon import ChemeleonFeaturizer
 from euos25.featurizers.conj_proxy import ConjugationProxyFeaturizer
 from euos25.featurizers.ecfp import ECFPFeaturizer
 from euos25.featurizers.mordred import MordredFeaturizer
 from euos25.featurizers.rdkit2d import RDKit2DFeaturizer
 from euos25.utils.io import load_csv, save_parquet
+
+try:
+    from euos25.featurizers.chemeleon import ChemeleonFeaturizer
+except ImportError:
+    ChemeleonFeaturizer = None
+
+try:
+    from euos25.featurizers.chemberta import ChemBERTaFeaturizer
+except ImportError:
+    ChemBERTaFeaturizer = None
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +32,7 @@ FEATURE_GROUP_MAPPING = {
     "rdkit2d": "rdkit2d",
     "mordred": "mordred",
     "chemeleon": "chemeleon",
+    "chemberta": "chemberta",
     "conj_proxy": "custom",
 }
 
@@ -45,7 +55,19 @@ def create_featurizer(config: FeaturizerConfig) -> Featurizer:
     elif config.name == "conj_proxy":
         return ConjugationProxyFeaturizer(**config.params)
     elif config.name == "chemeleon":
+        if ChemeleonFeaturizer is None:
+            raise ImportError(
+                "ChemeleonFeaturizer is not available. "
+                "Make sure chemprop is installed."
+            )
         return ChemeleonFeaturizer(**config.params)
+    elif config.name == "chemberta":
+        if ChemBERTaFeaturizer is None:
+            raise ImportError(
+                "ChemBERTaFeaturizer is not available. "
+                "Make sure transformers is installed."
+            )
+        return ChemBERTaFeaturizer(**config.params)
     else:
         raise ValueError(f"Unknown featurizer: {config.name}")
 
@@ -111,34 +133,77 @@ def build_features(
     return features
 
 
+def get_available_feature_groups(features: pd.DataFrame) -> set[str]:
+    """Extract available feature groups from features DataFrame.
+
+    Args:
+        features: DataFrame with features (columns have group prefixes like 'ecfp4__...')
+
+    Returns:
+        Set of available feature group names
+    """
+    groups = set()
+    for col in features.columns:
+        if "__" in col:
+            group = col.split("__")[0]
+            groups.add(group)
+        else:
+            # If no prefix, treat as a special group
+            groups.add("unknown")
+    return groups
+
+
 def filter_feature_groups(
     features: pd.DataFrame,
+    group_settings: dict[str, bool] | None = None,
     use_ecfp4: bool = True,
     use_rdkit2d: bool = True,
     use_mordred: bool = True,
     use_chemeleon: bool = True,
+    use_chemberta: bool = True,
     use_custom: bool = True,
+    **kwargs: bool,
 ) -> pd.DataFrame:
     """Filter features by group selection.
 
     Args:
         features: DataFrame with features (columns have group prefixes)
-        use_ecfp4: Whether to include ECFP4 features
-        use_rdkit2d: Whether to include RDKit 2D features
-        use_mordred: Whether to include Mordred features
-        use_chemeleon: Whether to include Chemeleon features
-        use_custom: Whether to include custom features (e.g., conjugation proxy)
+        group_settings: Dictionary mapping group names to boolean values. If provided,
+            this takes precedence over individual use_* parameters.
+        use_ecfp4: Whether to include ECFP4 features (used if group_settings not provided)
+        use_rdkit2d: Whether to include RDKit 2D features (used if group_settings not provided)
+        use_mordred: Whether to include Mordred features (used if group_settings not provided)
+        use_chemeleon: Whether to include Chemeleon features (used if group_settings not provided)
+        use_chemberta: Whether to include ChemBERTa features (used if group_settings not provided)
+        use_custom: Whether to include custom features (used if group_settings not provided)
+        **kwargs: Additional group settings (e.g., use_new_group=True)
 
     Returns:
         Filtered DataFrame with selected feature groups
     """
-    group_settings = {
-        "ecfp4": use_ecfp4,
-        "rdkit2d": use_rdkit2d,
-        "mordred": use_mordred,
-        "chemeleon": use_chemeleon,
-        "custom": use_custom,
-    }
+    # If group_settings dict is provided, use it directly
+    if group_settings is not None:
+        settings = group_settings.copy()
+        # Add any additional kwargs (remove 'use_' prefix)
+        for key, value in kwargs.items():
+            if key.startswith("use_"):
+                group_name = key[4:]  # Remove 'use_' prefix
+                settings[group_name] = value
+    else:
+        # Build from individual parameters (backward compatibility)
+        settings = {
+            "ecfp4": use_ecfp4,
+            "rdkit2d": use_rdkit2d,
+            "mordred": use_mordred,
+            "chemeleon": use_chemeleon,
+            "chemberta": use_chemberta,
+            "custom": use_custom,
+        }
+        # Add any additional kwargs (remove 'use_' prefix)
+        for key, value in kwargs.items():
+            if key.startswith("use_"):
+                group_name = key[4:]  # Remove 'use_' prefix
+                settings[group_name] = value
 
     # Select columns based on group settings
     selected_cols = []
@@ -146,7 +211,7 @@ def filter_feature_groups(
         # Extract group prefix
         if "__" in col:
             group = col.split("__")[0]
-            if group_settings.get(group, True):  # Default to True if group not found
+            if settings.get(group, True):  # Default to True if group not found
                 selected_cols.append(col)
         else:
             # If no prefix, include by default
@@ -158,7 +223,7 @@ def filter_feature_groups(
     filtered_features = features[selected_cols]
 
     logger.info(f"Filtered features: {len(filtered_features.columns)} features from {len(features.columns)} total")
-    logger.info(f"Active groups: {[g for g, active in group_settings.items() if active]}")
+    logger.info(f"Active groups: {[g for g, active in settings.items() if active]}")
 
     return filtered_features
 

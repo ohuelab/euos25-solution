@@ -11,7 +11,7 @@ import pandas as pd
 
 from euos25.config import Config
 from euos25.models.lgbm import LGBMClassifier
-from euos25.pipeline.features import filter_feature_groups
+from euos25.pipeline.features import filter_feature_groups, get_available_feature_groups
 from euos25.utils.io import load_json, load_parquet
 from euos25.utils.metrics import calc_metrics
 
@@ -97,12 +97,16 @@ def get_fixed_value(param_name: str, config: Config) -> Any:
     raise ValueError(f"No fixed value found for parameter: {param_name}")
 
 
-def suggest_all_params(trial: optuna.Trial, config: Config) -> Dict[str, Any]:
+def suggest_all_params(
+    trial: optuna.Trial, config: Config, available_groups: set[str] | None = None
+) -> Dict[str, Any]:
     """Suggest all hyperparameters for Optuna trial.
 
     Args:
         trial: Optuna trial
         config: Pipeline configuration
+        available_groups: Set of available feature group names. If None, will be detected
+            from features in the objective function.
 
     Returns:
         Dictionary of all parameters (tuned and fixed)
@@ -176,20 +180,27 @@ def suggest_all_params(trial: optuna.Trial, config: Config) -> Dict[str, Any]:
             )
 
         params["pos_weight"] = None  # Will be computed during training
+
     # Feature group selection (if enabled)
+    # Dynamically handle all available feature groups
     if config.optuna.feature_groups.get("tune", False):
-        params["use_ecfp4"] = trial.suggest_categorical("use_ecfp4", [True, False])
-        params["use_rdkit2d"] = trial.suggest_categorical("use_rdkit2d", [True, False])
-        params["use_mordred"] = trial.suggest_categorical("use_mordred", [True, False])
-        params["use_chemeleon"] = trial.suggest_categorical("use_chemeleon", [True, False])
-        params["use_custom"] = trial.suggest_categorical("use_custom", [True, False])
+        if available_groups is None:
+            # If groups not provided, default to known groups (backward compatibility)
+            available_groups = {"ecfp4", "rdkit2d", "mordred", "chemeleon", "chemberta", "custom"}
+
+        # Suggest boolean values for each available group
+        for group_name in sorted(available_groups):  # Sort for reproducibility
+            param_name = f"use_{group_name}"
+            params[param_name] = trial.suggest_categorical(param_name, [True, False])
     else:
         # Use all feature groups by default
-        params["use_ecfp4"] = True
-        params["use_rdkit2d"] = True
-        params["use_mordred"] = True
-        params["use_chemeleon"] = True
-        params["use_custom"] = True
+        if available_groups is None:
+            # If groups not provided, default to known groups (backward compatibility)
+            available_groups = {"ecfp4", "rdkit2d", "mordred", "chemeleon", "chemberta", "custom"}
+
+        for group_name in sorted(available_groups):
+            param_name = f"use_{group_name}"
+            params[param_name] = True
 
     # Fixed parameters
     params["n_estimators"] = config.model.params.get("n_estimators", 1000)
@@ -217,27 +228,34 @@ def objective(
     Returns:
         Average validation score across folds
     """
-    # Suggest all parameters
-    all_params = suggest_all_params(trial, config)
+    # Detect available feature groups from the features DataFrame
+    available_groups = get_available_feature_groups(features)
 
-    # Extract feature group selection parameters
-    feature_group_params = {
-        "use_ecfp4": all_params.pop("use_ecfp4", True),
-        "use_rdkit2d": all_params.pop("use_rdkit2d", True),
-        "use_mordred": all_params.pop("use_mordred", True),
-        "use_chemeleon": all_params.pop("use_chemeleon", True),
-        "use_custom": all_params.pop("use_custom", True),
-    }
+    # Suggest all parameters (pass available groups for dynamic handling)
+    all_params = suggest_all_params(trial, config, available_groups=available_groups)
+
+    # Extract feature group selection parameters dynamically
+    # Find all params that start with "use_" and are feature group flags
+    feature_group_params = {}
+    feature_group_keys = [key for key in all_params.keys() if key.startswith("use_")]
+
+    for key in feature_group_keys:
+        group_name = key[4:]  # Remove "use_" prefix
+        feature_group_params[group_name] = all_params.pop(key)
+
+    # Convert to dict format expected by filter_feature_groups
+    # (group_name -> bool mapping)
+    group_settings = feature_group_params
 
     # Check if at least one feature group is selected
-    if not any(feature_group_params.values()):
+    if not any(group_settings.values()):
         # If no groups selected, this is an invalid configuration
         # Return a very poor score to discourage this
         logger.warning(f"Trial {trial.number}: No feature groups selected, skipping")
         return 0.0
 
-    # Apply feature group filtering
-    filtered_features = filter_feature_groups(features, **feature_group_params)
+    # Apply feature group filtering using dict format
+    filtered_features = filter_feature_groups(features, group_settings=group_settings)
 
     # Run CV with these parameters
     fold_scores = []
