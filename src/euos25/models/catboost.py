@@ -150,10 +150,16 @@ class CatBoostClassifier(BaseClfModel):
         # class_weights = [1.0, pos_weight]
         cat_params["class_weights"] = [1.0, pos_weight]
 
+        # Handle verbose parameter: CatBoost requires non-negative integer
+        # Convert -1 (silent) to False or 0
+        if cat_params.get("verbose") == -1:
+            cat_params["verbose"] = False
+
         # Add any additional kwargs
         excluded_keys = [
             "name",
             "n_estimators",
+            "max_depth",  # Already converted to 'depth' above
             "pos_weight",
             "pos_weight_multiplier",
             "early_stopping_rounds",
@@ -161,10 +167,14 @@ class CatBoostClassifier(BaseClfModel):
             "focal_alpha",
             "focal_gamma",
             "focal_scale",
+            "verbose",  # Already handled above
         ]
         for key, value in self.params.items():
             if key not in cat_params and key not in excluded_keys:
                 cat_params[key] = value
+
+        # Debug: log final parameters (excluding sensitive info)
+        logger.debug(f"CatBoost parameters: { {k: v for k, v in cat_params.items() if k not in ['class_weights']} }")
 
         # Prepare training data
         X_train = X.values
@@ -195,12 +205,14 @@ class CatBoostClassifier(BaseClfModel):
         self.model = cb.CatBoostClassifier(**cat_params)
 
         # Train with early stopping if validation set is provided
+        # Convert verbose for fit method (CatBoost requires non-negative integer)
+        verbose_fit = False if self.params["verbose"] == -1 else self.params["verbose"]
         if eval_set is not None:
             self.model.fit(
                 train_pool,
                 eval_set=eval_set_cb,
                 early_stopping_rounds=self.params["early_stopping_rounds"],
-                verbose=self.params["verbose"],
+                verbose=verbose_fit,
             )
             # Get best iteration from the model
             self.best_iteration = self.model.get_best_iteration()
@@ -208,7 +220,7 @@ class CatBoostClassifier(BaseClfModel):
                 # Early stopping didn't trigger, use all iterations
                 self.best_iteration = self.params["n_estimators"]
         else:
-            self.model.fit(train_pool, verbose=self.params["verbose"])
+            self.model.fit(train_pool, verbose=verbose_fit)
             self.best_iteration = self.params["n_estimators"]
 
         logger.info(f"Training completed. Best iteration: {self.best_iteration}")
