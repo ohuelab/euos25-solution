@@ -1,0 +1,81 @@
+# Full Chemeleon+CatBoost configuration
+# Uses Chemeleon embeddings as features for CatBoost
+
+seed: 42
+folds: 5
+scaffold_min_size: 10
+
+# Task configuration
+task: "transmittance340"
+metrics:
+  - "roc_auc"
+  - "pr_auc"
+
+# Featurizers - Chemeleon embeddings
+featurizers:
+  - name: "chemeleon"
+    params:
+      chemeleon_path: "data/pretrained/chemeleon_mp.pt"
+      aggregation: "mean"
+      device: null  # Auto-detect (cuda/mps/cpu)
+
+# Model configuration - CatBoost
+model:
+  name: "catboost"
+  params:
+    n_estimators: 1000
+    # Parameters below will be tuned by Optuna
+    learning_rate: 0.03
+    max_depth: 6
+    subsample: 0.8
+    colsample_bylevel: 0.8
+    min_data_in_leaf: 20
+    l2_leaf_reg: 3.0
+
+# Imbalance handling
+imbalance:
+  use_pos_weight: true
+  pos_weight_from_data: true
+  use_sampling: false
+  use_focal_loss: false
+
+# Early stopping
+early_stopping_rounds: 200
+early_stopping_metric: "roc_auc"
+
+# Logging
+log_level: "INFO"
+
+# Optuna hyperparameter tuning configuration
+optuna:
+  enable: true
+  n_trials: 100
+  timeout: null  # No timeout (in seconds)
+  study_name: chemeleon_catboost_tuning
+
+  # CatBoost parameters to tune
+  # Any parameter not listed here will use the fixed value from model.params
+  catboost_params:
+    learning_rate:
+      type: float
+      min: 0.01
+      max: 0.08
+    max_depth:
+      type: int
+      min: 4
+      max: 10
+    min_data_in_leaf:
+      type: int
+      min: 5
+      max: 50
+    l2_leaf_reg:
+      type: float
+      min: 1.0
+      max: 10.0
+      log: true
+  pos_weight_params:
+    pos_weight_multiplier:
+      type: float
+      min: 0.5
+      max: 2.0
+

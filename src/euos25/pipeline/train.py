@@ -10,6 +10,7 @@ import pandas as pd
 from euos25.config import Config
 from euos25.models.base import ClfModel
 from euos25.models.lgbm import LGBMClassifier
+from euos25.models.catboost import CatBoostClassifier
 from euos25.models import ChemPropModel, CHEMPROP_AVAILABLE
 from euos25.pipeline.features import (
     filter_feature_groups,
@@ -59,6 +60,8 @@ def create_model(config: Config, checkpoint_dir: Optional[str] = None) -> ClfMod
 
     if model_name == "lgbm":
         return LGBMClassifier(**model_params)
+    elif model_name == "catboost":
+        return CatBoostClassifier(**model_params)
     elif model_name == "chemprop":
         if not CHEMPROP_AVAILABLE:
             raise ImportError(
@@ -130,6 +133,19 @@ def train_fold(
                 logger.info(f"  Model already exists at {model_dir}, skipping training")
                 from euos25.models.lgbm import LGBMClassifier
                 model = LGBMClassifier.load(str(model_dir))
+                # Predict on validation to compute metrics
+                y_pred = model.predict_proba(X_valid)
+                y_pred_proba = y_pred
+                metrics = calc_metrics(y_valid, y_pred_proba, metrics=config.metrics)
+                for metric_name, score in metrics.items():
+                    logger.info(f"  {metric_name}: {score:.6f}")
+                return model, metrics
+        elif config.model.name == "catboost":
+            model_path = model_dir / "model.cbm"
+            if model_path.exists():
+                logger.info(f"  Model already exists at {model_dir}, skipping training")
+                from euos25.models.catboost import CatBoostClassifier
+                model = CatBoostClassifier.load(str(model_dir))
                 # Predict on validation to compute metrics
                 y_pred = model.predict_proba(X_valid)
                 y_pred_proba = y_pred
@@ -413,6 +429,15 @@ def train_full(
             logger.info("=" * 50)
             from euos25.models.lgbm import LGBMClassifier
             return LGBMClassifier.load(str(full_model_dir))
+    elif config.model.name == "catboost":
+        model_path = full_model_dir / "model.cbm"
+        if model_path.exists():
+            logger.info("=" * 50)
+            logger.info("Full model already exists, skipping training")
+            logger.info(f"  Model path: {full_model_dir}")
+            logger.info("=" * 50)
+            from euos25.models.catboost import CatBoostClassifier
+            return CatBoostClassifier.load(str(full_model_dir))
     elif config.model.name == "chemprop":
         # For ChemProp, check if model exists (can be file or directory)
         if full_model_dir.exists() and (full_model_dir.is_file() or full_model_dir.is_dir()):
@@ -472,6 +497,32 @@ def train_full(
 
     # Handle model-specific full training adjustments
     if config.model.name == "lgbm":
+        # Calculate average best_iteration from CV
+        avg_best_iter = int(np.mean(best_iterations))
+        logger.info(f"  Average best iteration from CV: {avg_best_iter}")
+
+        # Calculate size ratio: full_size / avg_train_size
+        avg_train_size = np.mean(train_sizes)
+        size_ratio = len(X_full) / avg_train_size
+        logger.info(f"  Size ratio (full / avg_train): {size_ratio:.3f}")
+
+        # Adjust n_estimators: int(0.9 * size_ratio * avg_best_iter)
+        adjusted_n_estimators = int(0.9 * size_ratio * avg_best_iter)
+        # Ensure at least avg_best_iter
+        adjusted_n_estimators = max(adjusted_n_estimators, avg_best_iter)
+        logger.info(f"  Adjusted n_estimators: {adjusted_n_estimators}")
+
+        # Override n_estimators for full training
+        original_n_estimators = model.params["n_estimators"]
+        model.params["n_estimators"] = adjusted_n_estimators
+
+        # Train on full data (no validation set, no early stopping)
+        logger.info(f"Training with {adjusted_n_estimators} rounds (no early stopping)")
+        model.fit(X_full, y_full, eval_set=None)
+
+        # Restore original n_estimators (for metadata consistency)
+        model.params["n_estimators"] = original_n_estimators
+    elif config.model.name == "catboost":
         # Calculate average best_iteration from CV
         avg_best_iter = int(np.mean(best_iterations))
         logger.info(f"  Average best iteration from CV: {avg_best_iter}")

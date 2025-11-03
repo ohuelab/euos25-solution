@@ -13,11 +13,14 @@ featurizers:
       radius: 3
       n_bits: 2048
       use_counts: true
+      n_jobs: 48
   - name: rdkit2d
-    params: {}
+    params:
+      n_jobs: 48
   - name: mordred
     params:
       ignore_3d: true
+      n_jobs: 48
   - name: chemeleon
     params:
       chemeleon_path: "data/pretrained/chemeleon_mp.pt"
@@ -26,6 +29,9 @@ featurizers:
   - name: conj_proxy
     params:
       L_cut: 4
+  - name: chemberta
+    params:
+      pooling: mean
 
 model:
   name: lgbm

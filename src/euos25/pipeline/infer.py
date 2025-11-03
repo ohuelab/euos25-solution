@@ -9,6 +9,7 @@ import pandas as pd
 
 from euos25.config import Config
 from euos25.models.lgbm import LGBMClassifier
+from euos25.models.catboost import CatBoostClassifier
 from euos25.models import ChemPropModel, CHEMPROP_AVAILABLE
 from euos25.pipeline.features import (
     filter_feature_groups,
@@ -32,6 +33,8 @@ def load_fold_model(model_dir: Path, config: Config):
     """
     if config.model.name == "lgbm":
         return LGBMClassifier.load(str(model_dir))
+    elif config.model.name == "catboost":
+        return CatBoostClassifier.load(str(model_dir))
     elif config.model.name == "chemprop":
         if not CHEMPROP_AVAILABLE:
             raise ImportError(

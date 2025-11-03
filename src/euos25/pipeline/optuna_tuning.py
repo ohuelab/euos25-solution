@@ -11,6 +11,7 @@ import pandas as pd
 
 from euos25.config import Config
 from euos25.models.lgbm import LGBMClassifier
+from euos25.models.catboost import CatBoostClassifier
 from euos25.pipeline.features import (
     FEATURE_GROUP_MAPPING,
     filter_feature_groups,
@@ -34,6 +35,11 @@ DEFAULT_PARAMS = {
     "min_child_samples": 20,
     "reg_alpha": 0.0,
     "reg_lambda": 0.0,
+    # CatBoost defaults
+    "colsample_bylevel": 0.8,
+    "min_data_in_leaf": 20,
+    "l2_leaf_reg": 3.0,
+    # Common defaults
     "focal_alpha": 0.25,
     "focal_gamma": 2.0,
     "focal_scale": 100.0,
@@ -119,26 +125,57 @@ def suggest_all_params(
     """
     params = {}
 
-    # Suggest LGBM parameters (tuned ones from config.optuna.lgbm_params)
-    lgbm_param_names = [
-        "learning_rate",
-        "num_leaves",
-        "max_depth",
-        "subsample",
-        "colsample_bytree",
-        "min_child_samples",
-        "reg_alpha",
-        "reg_lambda",
-    ]
-    for param_name in lgbm_param_names:
-        if param_name in config.optuna.lgbm_params:
-            # Tune this parameter
-            params[param_name] = suggest_param(
-                trial, param_name, config.optuna.lgbm_params[param_name]
-            )
-        else:
-            # Use fixed value
-            params[param_name] = get_fixed_value(param_name, config)
+    model_name = config.model.name
+
+    # Suggest model-specific parameters
+    if model_name == "lgbm":
+        # Suggest LGBM parameters (tuned ones from config.optuna.lgbm_params)
+        lgbm_param_names = [
+            "learning_rate",
+            "num_leaves",
+            "max_depth",
+            "subsample",
+            "colsample_bytree",
+            "min_child_samples",
+            "reg_alpha",
+            "reg_lambda",
+        ]
+        for param_name in lgbm_param_names:
+            if param_name in config.optuna.lgbm_params:
+                # Tune this parameter
+                params[param_name] = suggest_param(
+                    trial, param_name, config.optuna.lgbm_params[param_name]
+                )
+            else:
+                # Use fixed value
+                params[param_name] = get_fixed_value(param_name, config)
+    elif model_name == "catboost":
+        # Suggest CatBoost parameters (tuned ones from config.optuna.catboost_params)
+        catboost_param_names = [
+            "learning_rate",
+            "max_depth",
+            "subsample",
+            "colsample_bylevel",
+            "min_data_in_leaf",
+            "l2_leaf_reg",
+        ]
+        for param_name in catboost_param_names:
+            if param_name in config.optuna.catboost_params:
+                # Tune this parameter
+                params[param_name] = suggest_param(
+                    trial, param_name, config.optuna.catboost_params[param_name]
+                )
+            else:
+                # Use fixed value
+                params[param_name] = get_fixed_value(param_name, config)
+    else:
+        # Generic parameters for other models
+        common_param_names = ["learning_rate", "max_depth"]
+        for param_name in common_param_names:
+            if param_name in config.model.params:
+                params[param_name] = config.model.params[param_name]
+            else:
+                params[param_name] = get_fixed_value(param_name, config)
 
     # Check if use_pos_weight should be tuned
     if "use_pos_weight" in config.optuna.imbalance_params:
@@ -379,9 +416,16 @@ def objective(
             base_pos_weight = n_neg / n_pos if n_pos > 0 else 1.0
             all_params["pos_weight"] = base_pos_weight * multiplier
 
-        # Create and train model
-        model = LGBMClassifier(**all_params)
-        model.fit(X_train, y_train, eval_set=(X_valid, y_valid))
+        # Create and train model based on model type
+        model_name = config.model.name
+        if model_name == "lgbm":
+            model = LGBMClassifier(**all_params)
+            model.fit(X_train, y_train, eval_set=(X_valid, y_valid))
+        elif model_name == "catboost":
+            model = CatBoostClassifier(**all_params)
+            model.fit(X_train, y_train, eval_set=(X_valid, y_valid))
+        else:
+            raise ValueError(f"Unsupported model for Optuna tuning: {model_name}")
 
         # Predict and evaluate
         y_pred = model.predict_proba(X_valid)
