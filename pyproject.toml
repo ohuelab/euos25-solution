@@ -25,6 +25,8 @@ dependencies = [
     "chemprop>=2.2.0",
     "lightning>=2.0.0",
     "torch>=2.0.0",
+    "mordred>=1.2.0",
+    "transformers>=4.30.0",
 ]
 
 [project.optional-dependencies]

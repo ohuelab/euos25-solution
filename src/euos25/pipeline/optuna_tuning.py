@@ -11,7 +11,11 @@ import pandas as pd
 
 from euos25.config import Config
 from euos25.models.lgbm import LGBMClassifier
-from euos25.pipeline.features import filter_feature_groups, get_available_feature_groups
+from euos25.pipeline.features import (
+    FEATURE_GROUP_MAPPING,
+    filter_feature_groups,
+    get_available_feature_groups,
+)
 from euos25.utils.io import load_json, load_parquet
 from euos25.utils.metrics import calc_metrics
 
@@ -235,20 +239,25 @@ def objective(
     all_params = suggest_all_params(trial, config, available_groups=available_groups)
 
     # Extract feature group selection parameters dynamically
-    # Find all params that start with "use_" and are feature group flags
+    # Only extract params that correspond to actual feature groups
+    valid_feature_groups = set(FEATURE_GROUP_MAPPING.values())
     feature_group_params = {}
     feature_group_keys = [key for key in all_params.keys() if key.startswith("use_")]
 
     for key in feature_group_keys:
         group_name = key[4:]  # Remove "use_" prefix
-        feature_group_params[group_name] = all_params.pop(key)
+        # Only include if it's an actual feature group name (not e.g., "focal_loss")
+        if group_name in valid_feature_groups:
+            feature_group_params[group_name] = all_params.pop(key)
+        # Otherwise, it's a model parameter like "use_focal_loss", keep it in all_params
 
     # Convert to dict format expected by filter_feature_groups
     # (group_name -> bool mapping)
     group_settings = feature_group_params
 
     # Check if at least one feature group is selected
-    if not any(group_settings.values()):
+    # Handle both empty dict and all False cases
+    if not group_settings or not any(group_settings.values()):
         # If no groups selected, this is an invalid configuration
         # Return a very poor score to discourage this
         logger.warning(f"Trial {trial.number}: No feature groups selected, skipping")

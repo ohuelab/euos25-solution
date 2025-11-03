@@ -15,8 +15,9 @@ from euos25.pipeline.infer import predict_oof, predict_test
 from euos25.pipeline.optuna_tuning import tune_hyperparameters
 from euos25.pipeline.prepare import prepare_data
 from euos25.pipeline.submit import create_submission, create_final_submission, generate_timestamped_submission
+from euos25.pipeline.features import FEATURE_GROUP_MAPPING
 from euos25.pipeline.train import train_cv, train_full
-from euos25.utils.io import load_csv, save_json
+from euos25.utils.io import load_csv, load_json, save_json
 from euos25.utils.seed import set_seed
 
 # Setup logging
@@ -137,6 +138,7 @@ def train(features, splits, config, outdir, label_col, data, task):
     labels = df.set_index("ID")[label_col]
 
     # Check if Optuna mode is enabled
+    feature_group_settings = None
     if cfg.optuna.enable:
         logger.info("Optuna mode enabled - running hyperparameter tuning")
         best_params = tune_hyperparameters(
@@ -148,10 +150,26 @@ def train(features, splits, config, outdir, label_col, data, task):
             task_name=task_name,
         )
 
+        # Extract feature group settings from best_params (if feature groups were tuned)
+        if cfg.optuna.feature_groups.get("tune", False):
+            valid_feature_groups = set(FEATURE_GROUP_MAPPING.values())
+            feature_group_settings = {}
+            for key, value in best_params.items():
+                if key.startswith("use_"):
+                    group_name = key[4:]  # Remove "use_" prefix
+                    # Only include if it's an actual feature group name (not e.g., "focal_loss")
+                    if group_name in valid_feature_groups:
+                        feature_group_settings[group_name] = value
+            if feature_group_settings:
+                logger.info(f"Extracted feature group settings from Optuna: {feature_group_settings}")
+
         # Update config with best parameters
         logger.info("Updating config with best parameters from Optuna")
         for key, value in best_params.items():
-            if key in ["focal_alpha", "focal_gamma"]:
+            if key.startswith("use_"):
+                # Skip feature group params - handled separately
+                continue
+            elif key in ["focal_alpha", "focal_gamma"]:
                 setattr(cfg.imbalance, key, value)
             elif key == "pos_weight_multiplier":
                 # Store multiplier for later use
@@ -179,6 +197,7 @@ def train(features, splits, config, outdir, label_col, data, task):
         best_iterations=best_iterations,
         train_sizes=train_sizes,
         task_name=task_name,
+        feature_group_settings=feature_group_settings,
     )
 
     logger.info("Training completed")
@@ -205,6 +224,31 @@ def infer(features, splits, config, model_dir, outdir, mode, task):
     # Set seed
     set_seed(cfg.seed)
 
+    # Try to load Optuna best_params if Optuna was used
+    feature_group_settings = None
+    if cfg.optuna.enable:
+        # Try to load best_params.json from optuna output directory
+        optuna_output_dir = Path(model_dir) / task_name / cfg.model.name / "optuna"
+        best_params_path = optuna_output_dir / "best_params.json"
+
+        if best_params_path.exists():
+            logger.info(f"Loading Optuna best parameters from {best_params_path}")
+            optuna_results = load_json(best_params_path)
+            best_params = optuna_results.get("best_params", {})
+
+            # Extract feature group settings if feature groups were tuned
+            if cfg.optuna.feature_groups.get("tune", False):
+                valid_feature_groups = set(FEATURE_GROUP_MAPPING.values())
+                feature_group_settings = {}
+                for key, value in best_params.items():
+                    if key.startswith("use_"):
+                        group_name = key[4:]  # Remove "use_" prefix
+                        # Only include if it's an actual feature group name (not e.g., "focal_loss")
+                        if group_name in valid_feature_groups:
+                            feature_group_settings[group_name] = value
+                if feature_group_settings:
+                    logger.info(f"Using Optuna-optimized feature groups: {feature_group_settings}")
+
     # Create output directory
     Path(outdir).mkdir(parents=True, exist_ok=True)
 
@@ -217,6 +261,7 @@ def infer(features, splits, config, model_dir, outdir, mode, task):
             config=cfg,
             output_path=str(output_path),
             task_name=task_name,
+            feature_group_settings=feature_group_settings,
         )
     elif mode == "test":
         output_path = Path(outdir) / f"{task_name}_test.csv"
@@ -226,6 +271,7 @@ def infer(features, splits, config, model_dir, outdir, mode, task):
             config=cfg,
             output_path=str(output_path),
             task_name=task_name,
+            feature_group_settings=feature_group_settings,
         )
     else:
         raise ValueError(f"Unknown mode: {mode}")

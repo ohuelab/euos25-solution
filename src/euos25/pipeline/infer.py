@@ -10,6 +10,7 @@ import pandas as pd
 from euos25.config import Config
 from euos25.models.lgbm import LGBMClassifier
 from euos25.models import ChemPropModel, CHEMPROP_AVAILABLE
+from euos25.pipeline.features import filter_feature_groups, get_feature_groups_from_config
 from euos25.utils.io import load_json, load_parquet, save_csv
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,7 @@ def predict_oof(
     config: Config,
     output_path: str,
     task_name: Optional[str] = None,
+    feature_group_settings: Optional[dict[str, bool]] = None,
 ) -> pd.DataFrame:
     """Generate out-of-fold predictions.
 
@@ -62,6 +64,8 @@ def predict_oof(
         config: Pipeline configuration
         output_path: Path to save predictions
         task_name: Task name override (defaults to config.task)
+        feature_group_settings: Optional feature group settings dict (from Optuna).
+            If provided, overrides config-based feature filtering.
 
     Returns:
         DataFrame with OOF predictions
@@ -69,6 +73,31 @@ def predict_oof(
     # Load features and splits
     features = load_parquet(features_path)
     splits = load_json(splits_path)
+
+    # Filter features based on feature_group_settings or config
+    if feature_group_settings and len(feature_group_settings) > 0:
+        # Check if at least one group is enabled
+        if any(feature_group_settings.values()):
+            # Use Optuna-optimized feature groups
+            logger.info("Using Optuna-optimized feature groups for OOF predictions")
+            features = filter_feature_groups(features, group_settings=feature_group_settings)
+        else:
+            raise ValueError(
+                f"All Optuna-optimized feature groups are disabled. "
+                f"At least one group must be enabled. Settings: {feature_group_settings}"
+            )
+    else:
+        # Filter features based on config (only use features specified in config)
+        group_settings = get_feature_groups_from_config(config)
+        if group_settings and len(group_settings) > 0:
+            # Check if at least one group is enabled
+            if any(group_settings.values()):
+                features = filter_feature_groups(features, group_settings=group_settings)
+            else:
+                raise ValueError(
+                    f"All feature groups are disabled in config. "
+                    f"At least one group must be enabled. Settings: {group_settings}"
+                )
 
     # Initialize predictions array
     predictions = np.zeros(len(features))
@@ -134,6 +163,7 @@ def predict_test(
     task_name: Optional[str] = None,
     average: bool = True,
     use_full_model: bool = True,
+    feature_group_settings: Optional[dict[str, bool]] = None,
 ) -> pd.DataFrame:
     """Generate test predictions by averaging across folds or using full model.
 
@@ -145,12 +175,39 @@ def predict_test(
         task_name: Task name override (defaults to config.task)
         average: Whether to average predictions across folds (ignored if use_full_model=True)
         use_full_model: If True, use full model trained on all data; otherwise use fold ensemble
+        feature_group_settings: Optional feature group settings dict (from Optuna).
+            If provided, overrides config-based feature filtering.
 
     Returns:
         DataFrame with test predictions
     """
     # Load features
     features = load_parquet(features_path)
+
+    # Filter features based on feature_group_settings or config
+    if feature_group_settings and len(feature_group_settings) > 0:
+        # Check if at least one group is enabled
+        if any(feature_group_settings.values()):
+            # Use Optuna-optimized feature groups
+            logger.info("Using Optuna-optimized feature groups for test predictions")
+            features = filter_feature_groups(features, group_settings=feature_group_settings)
+        else:
+            raise ValueError(
+                f"All Optuna-optimized feature groups are disabled. "
+                f"At least one group must be enabled. Settings: {feature_group_settings}"
+            )
+    else:
+        # Filter features based on config (only use features specified in config)
+        group_settings = get_feature_groups_from_config(config)
+        if group_settings and len(group_settings) > 0:
+            # Check if at least one group is enabled
+            if any(group_settings.values()):
+                features = filter_feature_groups(features, group_settings=group_settings)
+            else:
+                raise ValueError(
+                    f"All feature groups are disabled in config. "
+                    f"At least one group must be enabled. Settings: {group_settings}"
+                )
 
     # Use task_name override if provided, otherwise use config.task
     actual_task_name = task_name if task_name is not None else config.task

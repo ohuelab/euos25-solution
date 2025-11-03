@@ -11,6 +11,7 @@ from euos25.config import Config
 from euos25.models.base import ClfModel
 from euos25.models.lgbm import LGBMClassifier
 from euos25.models import ChemPropModel, CHEMPROP_AVAILABLE
+from euos25.pipeline.features import filter_feature_groups, get_feature_groups_from_config
 from euos25.utils.io import load_json, load_parquet
 from euos25.utils.metrics import calc_metrics, save_fold_metrics
 
@@ -248,6 +249,18 @@ def train_cv(
     features = load_parquet(features_path)
     splits = load_json(splits_path)
 
+    # Filter features based on config (only use features specified in config)
+    group_settings = get_feature_groups_from_config(config)
+    if group_settings and len(group_settings) > 0:
+        # Check if at least one group is enabled
+        if any(group_settings.values()):
+            features = filter_feature_groups(features, group_settings=group_settings)
+        else:
+            raise ValueError(
+                f"All feature groups are disabled in config. "
+                f"At least one group must be enabled. Settings: {group_settings}"
+            )
+
     # Use task_name override if provided, otherwise use config.task
     actual_task_name = task_name if task_name is not None else config.task
 
@@ -323,6 +336,7 @@ def train_full(
     best_iterations: List[int],
     train_sizes: List[int],
     task_name: Optional[str] = None,
+    feature_group_settings: Optional[dict[str, bool]] = None,
 ) -> ClfModel:
     """Train model on full training data.
 
@@ -334,12 +348,39 @@ def train_full(
         best_iterations: List of best_iteration from CV folds
         train_sizes: List of training set sizes from CV folds
         task_name: Task name override (defaults to config.task)
+        feature_group_settings: Optional feature group settings dict (from Optuna).
+            If provided, overrides config-based feature filtering.
 
     Returns:
         Trained model
     """
     # Load features
     features = load_parquet(features_path)
+
+    # Filter features based on feature_group_settings or config
+    if feature_group_settings and len(feature_group_settings) > 0:
+        # Check if at least one group is enabled
+        if any(feature_group_settings.values()):
+            # Use Optuna-optimized feature groups
+            logger.info("Using Optuna-optimized feature groups for full model training")
+            features = filter_feature_groups(features, group_settings=feature_group_settings)
+        else:
+            raise ValueError(
+                f"All Optuna-optimized feature groups are disabled. "
+                f"At least one group must be enabled. Settings: {feature_group_settings}"
+            )
+    else:
+        # Filter features based on config (only use features specified in config)
+        group_settings = get_feature_groups_from_config(config)
+        if group_settings and len(group_settings) > 0:
+            # Check if at least one group is enabled
+            if any(group_settings.values()):
+                features = filter_feature_groups(features, group_settings=group_settings)
+            else:
+                raise ValueError(
+                    f"All feature groups are disabled in config. "
+                    f"At least one group must be enabled. Settings: {group_settings}"
+                )
 
     # Use task_name override if provided, otherwise use config.task
     actual_task_name = task_name if task_name is not None else config.task

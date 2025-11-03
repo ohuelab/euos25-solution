@@ -153,6 +153,34 @@ def get_available_feature_groups(features: pd.DataFrame) -> set[str]:
     return groups
 
 
+def get_feature_groups_from_config(config: Config) -> dict[str, bool]:
+    """Get feature group settings from config.
+
+    Args:
+        config: Pipeline configuration
+
+    Returns:
+        Dictionary mapping group names to boolean values (True if enabled).
+        Returns empty dict if no featurizers specified (will use all features).
+    """
+    # Get feature group names from config featurizers
+    enabled_groups = set()
+    for feat_cfg in config.featurizers:
+        group_name = FEATURE_GROUP_MAPPING.get(feat_cfg.name)
+        if group_name:
+            enabled_groups.add(group_name)
+
+    # If no featurizers specified (e.g., for ChemProp), return empty dict (will use all)
+    if not enabled_groups:
+        return {}
+
+    # Build settings dict: all known groups, enabled ones set to True
+    all_groups = set(FEATURE_GROUP_MAPPING.values())
+    group_settings = {group: group in enabled_groups for group in all_groups}
+
+    return group_settings
+
+
 def filter_feature_groups(
     features: pd.DataFrame,
     group_settings: dict[str, bool] | None = None,
