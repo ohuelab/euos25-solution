@@ -15,6 +15,7 @@ from euos25.pipeline.features import (
     FEATURE_GROUP_MAPPING,
     filter_feature_groups,
     get_available_feature_groups,
+    get_feature_groups_from_config,
 )
 from euos25.utils.io import load_json, load_parquet
 from euos25.utils.metrics import calc_metrics
@@ -232,8 +233,25 @@ def objective(
     Returns:
         Average validation score across folds
     """
-    # Detect available feature groups from the features DataFrame
-    available_groups = get_available_feature_groups(features)
+    # Get feature groups enabled in config
+    config_groups_dict = get_feature_groups_from_config(config)
+    # Extract only groups that are True (enabled in config)
+    config_groups = {g for g, enabled in config_groups_dict.items() if enabled} if config_groups_dict else set()
+
+    # If config specifies groups, use those. Otherwise, detect from features.
+    if config_groups:
+        # Use intersection of config groups and actual feature groups
+        actual_feature_groups = get_available_feature_groups(features)
+        available_groups = config_groups & actual_feature_groups
+
+        logger.debug(
+            f"Trial {trial.number}: Config groups: {config_groups}, "
+            f"Actual groups in features: {actual_feature_groups}, "
+            f"Using: {available_groups}"
+        )
+    else:
+        # No featurizers in config (e.g., ChemProp), detect from features
+        available_groups = get_available_feature_groups(features)
 
     # Suggest all parameters (pass available groups for dynamic handling)
     all_params = suggest_all_params(trial, config, available_groups=available_groups)
@@ -264,7 +282,25 @@ def objective(
         return 0.0
 
     # Apply feature group filtering using dict format
-    filtered_features = filter_feature_groups(features, group_settings=group_settings)
+    try:
+        filtered_features = filter_feature_groups(features, group_settings=group_settings)
+    except ValueError as e:
+        # filter_feature_groups raises ValueError if no columns selected
+        logger.warning(
+            f"Trial {trial.number}: Feature filtering failed: {e}. "
+            f"Group settings: {group_settings}, "
+            f"Available groups: {get_available_feature_groups(features)}"
+        )
+        return 0.0
+    # Check if filtering actually resulted in features
+    # (group_settings may have True values but those groups might not exist in features)
+    if len(filtered_features.columns) == 0:
+        logger.warning(
+            f"Trial {trial.number}: No features remain after filtering. "
+            f"Group settings: {group_settings}, "
+            f"Available groups in features: {get_available_feature_groups(features)}"
+        )
+        return 0.0
 
     # Run CV with these parameters
     fold_scores = []
@@ -286,6 +322,20 @@ def objective(
 
         X_valid = filtered_features.loc[valid_ids]
         y_valid = labels.loc[valid_ids].values
+
+        # Filter to numeric columns only (exclude SMILES and other non-numeric columns)
+        numeric_cols = X_train.select_dtypes(include=[np.number]).columns.tolist()
+        if len(numeric_cols) == 0:
+            logger.warning(
+                f"Trial {trial.number}, Fold {fold_idx}: No numeric features after filtering. "
+                f"All columns: {list(X_train.columns)}"
+            )
+            # Skip this fold with a poor score
+            fold_scores.append(0.0)
+            continue
+
+        X_train = X_train[numeric_cols]
+        X_valid = X_valid[numeric_cols]
 
         # Handle pos_weight_multiplier
         if "pos_weight_multiplier" in all_params:

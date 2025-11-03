@@ -159,8 +159,19 @@ class LGBMClassifier(BaseClfModel):
         Returns:
             Self
         """
+        # Filter to numeric columns only (exclude SMILES and other non-numeric columns)
+        numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+        if len(numeric_cols) == 0:
+            raise ValueError(
+                f"Training data has 0 numeric features. "
+                f"All columns: {list(X.columns)}, X.shape={X.shape}"
+            )
+        
+        # Use only numeric columns
+        X = X[numeric_cols]
+        
         # Store feature names
-        self.feature_names = list(X.columns)
+        self.feature_names = numeric_cols
 
         # Check if using focal loss
         use_focal_loss = self.params.get("use_focal_loss", False)
@@ -236,7 +247,11 @@ class LGBMClassifier(BaseClfModel):
         valid_names = ["train"]
 
         if eval_set is not None:
+            
             X_val, y_val = eval_set
+            
+            # Ensure validation set uses same numeric columns as training
+            X_val = X_val[numeric_cols]
             valid_data = lgb.Dataset(
                 X_val,
                 label=y_val,
