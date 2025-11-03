@@ -1,0 +1,98 @@
+# Full feature set with Optuna tuning
+# Includes ECFP4, Mordred, Chemeleon, and custom features
+# Feature group selection is tuned by Optuna
+
+seed: 42
+folds: 5
+scaffold_min_size: 10
+
+# All feature types
+featurizers:
+  - name: ecfp
+    params:
+      radius: 3
+      n_bits: 2048
+      use_counts: true
+  - name: rdkit2d
+    params: {}
+  - name: mordred
+    params:
+      ignore_3d: true
+  - name: chemeleon
+    params:
+      chemeleon_path: "data/pretrained/chemeleon_mp.pt"
+      aggregation: "mean"
+      device: null  # Auto-detect (cuda/mps/cpu)
+  - name: conj_proxy
+    params:
+      L_cut: 4
+
+model:
+  name: lgbm
+  params:
+    n_estimators: 1000
+    # Parameters below will be tuned by Optuna
+    learning_rate: 0.02
+    max_depth: -1
+    num_leaves: 255
+    subsample: 0.8
+    colsample_bytree: 0.8
+    min_child_samples: 10
+    reg_alpha: 0.1
+    reg_lambda: 0.1
+
+imbalance:
+  use_pos_weight: true
+  pos_weight_from_data: true
+
+plates:
+  normalize: false
+
+task: y_fluo_any
+metrics:
+  - roc_auc
+  - pr_auc
+
+early_stopping_rounds: 200
+early_stopping_metric: roc_auc
+
+log_level: INFO
+
+# Optuna hyperparameter tuning configuration
+optuna:
+  enable: true
+  n_trials: 200
+  timeout: null  # No timeout (in seconds)
+  study_name: full_feat_tuning
+
+  # LGBM parameters to tune
+  lgbm_params:
+    learning_rate:
+      type: float
+      min: 0.01
+      max: 0.08
+    num_leaves:
+      type: int
+      min: 63
+      max: 511
+    min_child_samples:
+      type: int
+      min: 5
+      max: 50
+    reg_alpha:
+      type: float
+      min: 0.001
+      max: 1.0
+      log: true
+
+  # Pos weight parameters
+  pos_weight_params:
+    pos_weight_multiplier:
+      type: float
+      min: 0.5
+      max: 2.0
+
+  # Feature group selection
+  # Optuna will tune which feature groups to include
+  feature_groups:
+    tune: true

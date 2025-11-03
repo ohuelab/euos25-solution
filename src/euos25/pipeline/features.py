@@ -1,8 +1,7 @@
 """Feature generation pipeline."""
 
 import logging
-from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 import pandas as pd
 
@@ -11,10 +10,21 @@ from euos25.featurizers.base import Featurizer
 from euos25.featurizers.chemeleon import ChemeleonFeaturizer
 from euos25.featurizers.conj_proxy import ConjugationProxyFeaturizer
 from euos25.featurizers.ecfp import ECFPFeaturizer
+from euos25.featurizers.mordred import MordredFeaturizer
 from euos25.featurizers.rdkit2d import RDKit2DFeaturizer
 from euos25.utils.io import load_csv, save_parquet
 
 logger = logging.getLogger(__name__)
+
+
+# Define feature group mappings
+FEATURE_GROUP_MAPPING = {
+    "ecfp": "ecfp4",
+    "rdkit2d": "rdkit2d",
+    "mordred": "mordred",
+    "chemeleon": "chemeleon",
+    "conj_proxy": "custom",
+}
 
 
 def create_featurizer(config: FeaturizerConfig) -> Featurizer:
@@ -30,6 +40,8 @@ def create_featurizer(config: FeaturizerConfig) -> Featurizer:
         return ECFPFeaturizer(**config.params)
     elif config.name == "rdkit2d":
         return RDKit2DFeaturizer(**config.params)
+    elif config.name == "mordred":
+        return MordredFeaturizer(**config.params)
     elif config.name == "conj_proxy":
         return ConjugationProxyFeaturizer(**config.params)
     elif config.name == "chemeleon":
@@ -78,6 +90,9 @@ def build_features(
         feat_df = featurizer.transform(df, smiles_col=smiles_col)
 
         if not feat_df.empty:
+            # Add group prefix to column names for identification
+            group_name = FEATURE_GROUP_MAPPING.get(featurizer.name, featurizer.name)
+            feat_df.columns = [f"{group_name}__{col}" for col in feat_df.columns]
             feature_dfs.append(feat_df)
         else:
             logger.warning(f"Featurizer {featurizer.name} produced no features")
@@ -94,6 +109,58 @@ def build_features(
 
     logger.info(f"Total features generated: {len(features.columns)}")
     return features
+
+
+def filter_feature_groups(
+    features: pd.DataFrame,
+    use_ecfp4: bool = True,
+    use_rdkit2d: bool = True,
+    use_mordred: bool = True,
+    use_chemeleon: bool = True,
+    use_custom: bool = True,
+) -> pd.DataFrame:
+    """Filter features by group selection.
+
+    Args:
+        features: DataFrame with features (columns have group prefixes)
+        use_ecfp4: Whether to include ECFP4 features
+        use_rdkit2d: Whether to include RDKit 2D features
+        use_mordred: Whether to include Mordred features
+        use_chemeleon: Whether to include Chemeleon features
+        use_custom: Whether to include custom features (e.g., conjugation proxy)
+
+    Returns:
+        Filtered DataFrame with selected feature groups
+    """
+    group_settings = {
+        "ecfp4": use_ecfp4,
+        "rdkit2d": use_rdkit2d,
+        "mordred": use_mordred,
+        "chemeleon": use_chemeleon,
+        "custom": use_custom,
+    }
+
+    # Select columns based on group settings
+    selected_cols = []
+    for col in features.columns:
+        # Extract group prefix
+        if "__" in col:
+            group = col.split("__")[0]
+            if group_settings.get(group, True):  # Default to True if group not found
+                selected_cols.append(col)
+        else:
+            # If no prefix, include by default
+            selected_cols.append(col)
+
+    if not selected_cols:
+        raise ValueError("No feature groups selected - at least one must be enabled")
+
+    filtered_features = features[selected_cols]
+
+    logger.info(f"Filtered features: {len(filtered_features.columns)} features from {len(features.columns)} total")
+    logger.info(f"Active groups: {[g for g, active in group_settings.items() if active]}")
+
+    return filtered_features
 
 
 def build_features_from_config(

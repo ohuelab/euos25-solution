@@ -6,6 +6,7 @@ import pytest
 
 from euos25.featurizers.conj_proxy import ConjugationProxyFeaturizer
 from euos25.featurizers.ecfp import ECFPFeaturizer
+from euos25.featurizers.mordred import MordredFeaturizer
 from euos25.featurizers.rdkit2d import RDKit2DFeaturizer
 
 
@@ -37,12 +38,20 @@ def test_ecfp_featurizer(sample_smiles):
 def test_rdkit2d_featurizer(sample_smiles):
     """Test RDKit 2D featurizer."""
     featurizer = RDKit2DFeaturizer()
-
     features = featurizer.transform(sample_smiles)
-
     assert len(features) == 3
     assert len(features.columns) > 0
     assert all(features.columns.str.startswith("rdkit2d_"))
+    assert features.dtypes[0] in [np.float32, np.float64]
+
+
+def test_mordred_featurizer(sample_smiles):
+    """Test Mordred featurizer."""
+    featurizer = MordredFeaturizer()
+    features = featurizer.transform(sample_smiles)
+    assert len(features) == 3
+    assert len(features.columns) > 0
+    assert all(features.columns.str.startswith("mordred_"))
     assert features.dtypes[0] in [np.float32, np.float64]
 
 

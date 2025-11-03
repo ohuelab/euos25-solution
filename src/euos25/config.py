@@ -94,6 +94,8 @@ class OptunaConfig(BaseModel):
               type: float
               min: 50.0
               max: 200.0
+          feature_groups:
+            tune: true  # Enable feature group selection tuning
     """
 
     enable: bool = False
@@ -108,6 +110,7 @@ class OptunaConfig(BaseModel):
     imbalance_params: Dict[str, Dict[str, Any]] = Field(default_factory=dict)  # use_pos_weight, use_focal_loss
     focal_params: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     pos_weight_params: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    feature_groups: Dict[str, Any] = Field(default_factory=dict)  # Feature group selection tuning
 
 
 class Config(BaseModel):

@@ -14,7 +14,11 @@ logger = logging.getLogger(__name__)
 
 
 class RDKit2DFeaturizer(BaseFeaturizer):
-    """RDKit 2D molecular descriptors featurizer."""
+    """RDKit 2D molecular descriptors featurizer.
+
+    This featurizer uses RDKit's built-in 2D molecular descriptors
+    (from rdkit.Chem.Descriptors module).
+    """
 
     def __init__(
         self,
@@ -86,7 +90,7 @@ class RDKit2DFeaturizer(BaseFeaturizer):
         Returns:
             DataFrame with descriptor feature columns
         """
-        logger.info(f"Generating {self.name} features ({len(self.descriptor_names)} descriptors)")
+        logger.info(f"Generating {self.name} features using RDKit 2D descriptors ({len(self.descriptor_names)} descriptors)")
 
         # Generate descriptors
         desc_list = []
@@ -120,7 +124,7 @@ class RDKit2DFeaturizer(BaseFeaturizer):
 
 
 def get_common_descriptors() -> List[str]:
-    """Get list of commonly used 2D descriptors.
+    """Get list of commonly used RDKit 2D descriptors.
 
     Returns:
         List of descriptor names

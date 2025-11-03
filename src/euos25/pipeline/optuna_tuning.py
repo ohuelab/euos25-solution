@@ -11,6 +11,7 @@ import pandas as pd
 
 from euos25.config import Config
 from euos25.models.lgbm import LGBMClassifier
+from euos25.pipeline.features import filter_feature_groups
 from euos25.utils.io import load_json, load_parquet
 from euos25.utils.metrics import calc_metrics
 
@@ -175,6 +176,20 @@ def suggest_all_params(trial: optuna.Trial, config: Config) -> Dict[str, Any]:
             )
 
         params["pos_weight"] = None  # Will be computed during training
+    # Feature group selection (if enabled)
+    if config.optuna.feature_groups.get("tune", False):
+        params["use_ecfp4"] = trial.suggest_categorical("use_ecfp4", [True, False])
+        params["use_rdkit2d"] = trial.suggest_categorical("use_rdkit2d", [True, False])
+        params["use_mordred"] = trial.suggest_categorical("use_mordred", [True, False])
+        params["use_chemeleon"] = trial.suggest_categorical("use_chemeleon", [True, False])
+        params["use_custom"] = trial.suggest_categorical("use_custom", [True, False])
+    else:
+        # Use all feature groups by default
+        params["use_ecfp4"] = True
+        params["use_rdkit2d"] = True
+        params["use_mordred"] = True
+        params["use_chemeleon"] = True
+        params["use_custom"] = True
 
     # Fixed parameters
     params["n_estimators"] = config.model.params.get("n_estimators", 1000)
@@ -205,6 +220,25 @@ def objective(
     # Suggest all parameters
     all_params = suggest_all_params(trial, config)
 
+    # Extract feature group selection parameters
+    feature_group_params = {
+        "use_ecfp4": all_params.pop("use_ecfp4", True),
+        "use_rdkit2d": all_params.pop("use_rdkit2d", True),
+        "use_mordred": all_params.pop("use_mordred", True),
+        "use_chemeleon": all_params.pop("use_chemeleon", True),
+        "use_custom": all_params.pop("use_custom", True),
+    }
+
+    # Check if at least one feature group is selected
+    if not any(feature_group_params.values()):
+        # If no groups selected, this is an invalid configuration
+        # Return a very poor score to discourage this
+        logger.warning(f"Trial {trial.number}: No feature groups selected, skipping")
+        return 0.0
+
+    # Apply feature group filtering
+    filtered_features = filter_feature_groups(features, **feature_group_params)
+
     # Run CV with these parameters
     fold_scores = []
 
@@ -216,14 +250,14 @@ def objective(
         valid_pos_indices = fold_data["valid"]
 
         # Convert to IDs
-        train_ids = features.index[train_pos_indices]
-        valid_ids = features.index[valid_pos_indices]
+        train_ids = filtered_features.index[train_pos_indices]
+        valid_ids = filtered_features.index[valid_pos_indices]
 
         # Get features and labels
-        X_train = features.loc[train_ids]
+        X_train = filtered_features.loc[train_ids]
         y_train = labels.loc[train_ids].values
 
-        X_valid = features.loc[valid_ids]
+        X_valid = filtered_features.loc[valid_ids]
         y_valid = labels.loc[valid_ids].values
 
         # Handle pos_weight_multiplier
