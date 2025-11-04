@@ -14,29 +14,8 @@ import optuna
 from typing import Dict, List, Tuple
 import json
 
-# Configuration - Single task model names
-single_task_names = [
-    'full',
-    'full_optuna',
-    'full_focal',
-    'full_focal_optuna',
-    'full_chemprop',
-    'full_chemprop_focal',
-    'full_chemeleon',
-    'full_chemeleon_focal',
-    'full_chemeleon_lgbm',
-    'full_chemeleon_lgbm_focal'
-]
-
-# Configuration - Multitask model names
-multitask_names = [
-    'multitask_all_chemeleon',
-    'multitask_all_chemprop',
-    'multitask_fluo_chemeleon',
-    'multitask_fluo_chemprop',
-    'multitask_trans_chemeleon',
-    'multitask_trans_chemprop',
-]
+# Note: Model names are now discovered dynamically from data/preds directory
+# Only models with both OOF and test predictions for each task are used
 
 # Task configuration: (task_key, single_task_name, label_col, prepared_file, multitask_task_name)
 tasks = [
@@ -46,10 +25,12 @@ tasks = [
     ('trans_450', 'y_trans_any', 'Transmittance', 'train_trans_450_prepared.csv', 'transmittance450'),
 ]
 
-# Paths
-pred_base_dir = Path("../data/preds")
-processed_base_dir = Path("../data/processed")
-output_dir = Path("../data/ensembles")
+# Paths - Use script location to find project root
+SCRIPT_DIR = Path(__file__).parent.absolute()
+PROJECT_ROOT = SCRIPT_DIR.parent  # notebooks/ -> project root
+pred_base_dir = PROJECT_ROOT / "data" / "preds"
+processed_base_dir = PROJECT_ROOT / "data" / "processed"
+output_dir = PROJECT_ROOT / "data" / "ensembles"
 output_dir.mkdir(parents=True, exist_ok=True)
 
 # Try different feature directories for training data
@@ -59,8 +40,10 @@ feature_dirs = ['ecfp4', 'chemeleon', '']
 splits_dirs = ['ecfp4', 'chemprop', 'chemeleon', 'chemeleon_lgbm', '']
 
 
-def find_available_models(task_key: str, task_name: str, mt_task_name: str) -> Tuple[List[str], List[str]]:
+def find_available_models(task_key: str, task_name: str, mt_task_name: str) -> Tuple[List[str], List[str], Dict[str, Dict[str, Path]]]:
     """Find available single-task and multitask models for a given task.
+
+    Only includes models that have BOTH OOF and test predictions for the task.
 
     Args:
         task_key: Task key (e.g., 'fluo_340_450')
@@ -68,33 +51,61 @@ def find_available_models(task_key: str, task_name: str, mt_task_name: str) -> T
         mt_task_name: Multitask task name (e.g., 'fluorescence340_450')
 
     Returns:
-        Tuple of (available_single_task_models, available_multitask_models)
+        Tuple of (available_single_task_models, available_multitask_models, file_paths_dict)
+        where file_paths_dict maps model_name to {'oof': Path, 'test': Path}
     """
     available_single = []
     available_multitask = []
+    file_paths = {}
 
-    # Check single-task models
-    for model_name in single_task_names:
-        oof_path = pred_base_dir / model_name / task_key / f"{task_name}_oof.csv"
-        if oof_path.exists():
-            available_single.append(model_name)
+    # Scan pred_base_dir for all model directories
+    if not pred_base_dir.exists():
+        return available_single, available_multitask, file_paths
 
-    # Check multitask models
-    for model_name in multitask_names:
-        oof_path = pred_base_dir / model_name / "oof" / f"{mt_task_name}_oof.csv"
-        if oof_path.exists():
-            available_multitask.append(model_name)
+    # Check all directories in preds folder
+    for model_dir in sorted(pred_base_dir.iterdir()):
+        if not model_dir.is_dir():
+            continue
 
-    return available_single, available_multitask
+        model_name = model_dir.name
+
+        # Skip special directories
+        if model_name in ['prev', 'oof_eval_all_tasks.csv', 'oof_eval_all_tasks_pivot.csv']:
+            continue
+
+        # Check if it's a multitask model (has 'oof' and 'test' subdirectories)
+        oof_subdir = model_dir / "oof"
+        test_subdir = model_dir / "test"
+
+        if oof_subdir.exists() and test_subdir.exists():
+            # Multitask model
+            oof_path = oof_subdir / f"{mt_task_name}_oof.csv"
+            test_path = test_subdir / f"{mt_task_name}_test.csv"
+
+            if oof_path.exists() and test_path.exists():
+                available_multitask.append(model_name)
+                file_paths[model_name] = {'oof': oof_path, 'test': test_path}
+        else:
+            # Single-task model - check if task directory exists
+            task_dir = model_dir / task_key
+            if task_dir.exists():
+                oof_path = task_dir / f"{task_name}_oof.csv"
+                test_path = task_dir / f"{task_name}_test.csv"
+
+                if oof_path.exists() and test_path.exists():
+                    available_single.append(model_name)
+                    file_paths[model_name] = {'oof': oof_path, 'test': test_path}
+
+    return available_single, available_multitask, file_paths
 
 
-def load_predictions(task_key: str, task_name: str, mt_task_name: str) -> Dict[str, pd.Series]:
+def load_predictions(file_paths: Dict[str, Dict[str, Path]], available_single: List[str], available_multitask: List[str]) -> Dict[str, pd.Series]:
     """Load all available predictions for a task.
 
     Args:
-        task_key: Task key
-        task_name: Single task name
-        mt_task_name: Multitask task name
+        file_paths: Dictionary mapping model_name to {'oof': Path, 'test': Path}
+        available_single: List of available single-task model names
+        available_multitask: List of available multitask model names
 
     Returns:
         Dictionary mapping model_name to prediction Series indexed by ID
@@ -102,48 +113,47 @@ def load_predictions(task_key: str, task_name: str, mt_task_name: str) -> Dict[s
     predictions = {}
 
     # Load single-task predictions
-    for model_name in single_task_names:
-        oof_path = pred_base_dir / model_name / task_key / f"{task_name}_oof.csv"
-        if oof_path.exists():
-            try:
-                # Try reading with index_col=0 first (if mol_id is index)
-                df = pd.read_csv(oof_path, index_col=0)
-                # Check if index is named or if we need to reset
-                if df.index.name in ['mol_id', 'ID'] or df.index.name is None:
-                    # Reset and check for ID column
-                    df_reset = df.reset_index()
-                    if 'mol_id' in df_reset.columns:
-                        df = df_reset.rename(columns={'mol_id': 'ID'}).set_index('ID')
-                    elif 'ID' in df_reset.columns:
-                        df = df_reset.set_index('ID')
-                    else:
-                        # No ID column, use index as ID
-                        df = df_reset.set_index(df_reset.index.rename('ID'))
-                predictions[f"single_{model_name}"] = df['prediction']
-            except Exception as e:
-                print(f"  ⚠️  Error loading {model_name}: {e}")
-                continue
+    for model_name in available_single:
+        oof_path = file_paths[model_name]['oof']
+        try:
+            # Try reading with index_col=0 first (if mol_id is index)
+            df = pd.read_csv(oof_path, index_col=0)
+            # Check if index is named or if we need to reset
+            if df.index.name in ['mol_id', 'ID'] or df.index.name is None:
+                # Reset and check for ID column
+                df_reset = df.reset_index()
+                if 'mol_id' in df_reset.columns:
+                    df = df_reset.rename(columns={'mol_id': 'ID'}).set_index('ID')
+                elif 'ID' in df_reset.columns:
+                    df = df_reset.set_index('ID')
+                else:
+                    # No ID column, use index as ID
+                    df = df_reset.set_index(df_reset.index.rename('ID'))
+            predictions[f"single_{model_name}"] = df['prediction']
+        except Exception as e:
+            print(f"  ⚠️  Error loading {model_name}: {e}")
+            continue
 
     # Load multitask predictions
-    for model_name in multitask_names:
-        oof_path = pred_base_dir / model_name / "oof" / f"{mt_task_name}_oof.csv"
-        if oof_path.exists():
-            try:
-                df = pd.read_csv(oof_path)
-                # Check for ID or mol_id column
-                if 'ID' in df.columns:
-                    df = df.set_index('ID')
-                elif 'mol_id' in df.columns:
-                    df = df.rename(columns={'mol_id': 'ID'}).set_index('ID')
-                else:
-                    # Try index_col=0
-                    df = pd.read_csv(oof_path, index_col=0)
-                    if df.index.name not in ['ID', 'mol_id']:
-                        df.index.name = 'ID'
-                predictions[f"multitask_{model_name}"] = df['prediction']
-            except Exception as e:
-                print(f"  ⚠️  Error loading multitask {model_name}: {e}")
-                continue
+    for model_name in available_multitask:
+        oof_path = file_paths[model_name]['oof']
+        try:
+            df = pd.read_csv(oof_path)
+            # Check for ID or mol_id column
+            if 'ID' in df.columns:
+                df = df.set_index('ID')
+            elif 'mol_id' in df.columns:
+                df = df.rename(columns={'mol_id': 'ID'}).set_index('ID')
+            else:
+                # Try index_col=0
+                df = pd.read_csv(oof_path, index_col=0)
+                if df.index.name not in ['ID', 'mol_id']:
+                    df.index.name = 'ID'
+            # model_name already includes 'multitask_' prefix, so use it directly
+            predictions[model_name] = df['prediction']
+        except Exception as e:
+            print(f"  ⚠️  Error loading multitask {model_name}: {e}")
+            continue
 
     return predictions
 
@@ -306,13 +316,23 @@ def optimize_ensemble_for_fold(
     valid_ids_set = set(valid_ids)
     y_true_valid = y_true.loc[y_true.index.isin(valid_ids_set)]
 
-    # Create study for this fold
+    # Create study for this fold - delete existing study if it exists
     study_name = f"ensemble_{task_key}_fold_{fold_idx}"
+    study_db_path = output_dir / f"{study_name}.db"
+
+    # Delete existing study database if it exists (for fresh start)
+    if study_db_path.exists():
+        try:
+            study_db_path.unlink()
+        except Exception as e:
+            print(f"    Warning: Could not delete existing study database: {e}")
+
+    # Create new study
     study = optuna.create_study(
         direction='maximize',
         study_name=study_name,
-        storage=f"sqlite:///{output_dir}/{study_name}.db",
-        load_if_exists=True
+        storage=f"sqlite:///{study_db_path}",
+        load_if_exists=False
     )
 
     # Optimize on validation set only
@@ -354,10 +374,10 @@ def optimize_ensemble_for_fold(
 
         return auc
 
-    # Optimize
+    # Optimize with fresh start (use full n_trials)
     study.optimize(
         fold_objective,
-        n_trials=n_trials - len(study.trials),
+        n_trials=n_trials,
         show_progress_bar=False
     )
 
@@ -402,20 +422,34 @@ def optimize_ensemble_for_task(
     print(f"Optimizing ensemble for task: {task_key} (Nested CV)")
     print(f"{'='*70}")
 
-    # Find available models
-    available_single, available_multitask = find_available_models(task_key, task_name, mt_task_name)
+    # Find available models (only those with both OOF and test files)
+    available_single, available_multitask, file_paths = find_available_models(task_key, task_name, mt_task_name)
 
-    print(f"Available single-task models ({len(available_single)}): {available_single}")
-    print(f"Available multitask models ({len(available_multitask)}): {available_multitask}")
+    print(f"\n📊 Available Models (with both OOF and test predictions):")
+    print(f"  Single-task models ({len(available_single)}):")
+    for model_name in available_single:
+        oof_path = file_paths[model_name]['oof']
+        test_path = file_paths[model_name]['test']
+        print(f"    ✓ {model_name}")
+        print(f"      OOF:  {oof_path.relative_to(PROJECT_ROOT)}")
+        print(f"      Test: {test_path.relative_to(PROJECT_ROOT)}")
+
+    print(f"  Multitask models ({len(available_multitask)}):")
+    for model_name in available_multitask:
+        oof_path = file_paths[model_name]['oof']
+        test_path = file_paths[model_name]['test']
+        print(f"    ✓ {model_name}")
+        print(f"      OOF:  {oof_path.relative_to(PROJECT_ROOT)}")
+        print(f"      Test: {test_path.relative_to(PROJECT_ROOT)}")
 
     if len(available_single) == 0 and len(available_multitask) == 0:
-        print(f"⚠️  No models available for {task_key}, skipping...")
+        print(f"\n⚠️  No models available for {task_key} (with both OOF and test files), skipping...")
         return None
 
     # Load predictions
-    print("Loading predictions...")
-    predictions = load_predictions(task_key, task_name, mt_task_name)
-    print(f"Loaded predictions from {len(predictions)} models")
+    print(f"\n📥 Loading OOF predictions...")
+    predictions = load_predictions(file_paths, available_single, available_multitask)
+    print(f"  Loaded predictions from {len(predictions)} models")
 
     # Load training data
     print("Loading training data...")
@@ -549,7 +583,14 @@ def optimize_ensemble_for_task(
         'n_available_multitask': len(available_multitask),
         'n_samples': len(oof_ids),
         'n_folds': n_folds,
-        'n_trials_per_fold': n_trials
+        'n_trials_per_fold': n_trials,
+        'file_paths': {
+            model_name: {
+                'oof': str(paths['oof'].relative_to(PROJECT_ROOT)),
+                'test': str(paths['test'].relative_to(PROJECT_ROOT))
+            }
+            for model_name, paths in file_paths.items()
+        }
     }
 
     # Save to JSON
@@ -629,7 +670,8 @@ def generate_test_predictions_for_task(
     task_key: str,
     task_name: str,
     mt_task_name: str,
-    selected_models: List[str]
+    selected_models: List[str],
+    file_paths: Dict[str, Dict[str, Path]] = None
 ) -> pd.DataFrame:
     """Generate test predictions for a task using selected models.
 
@@ -638,23 +680,45 @@ def generate_test_predictions_for_task(
         task_name: Single task name
         mt_task_name: Multitask task name
         selected_models: List of selected model names (with prefix like "single_full")
+        file_paths: Optional dictionary mapping model_name to {'oof': Path, 'test': Path}
+                    If not provided, will be recalculated
 
     Returns:
         DataFrame with ID and prediction columns
     """
     predictions = {}
 
+    # If file_paths not provided, recalculate them
+    if file_paths is None:
+        _, _, file_paths = find_available_models(task_key, task_name, mt_task_name)
+
     for model_name in selected_models:
         if model_name.startswith("single_"):
-            # Single-task model
+            # Single-task model - remove "single_" prefix
             actual_model_name = model_name.replace("single_", "")
-            test_path = pred_base_dir / actual_model_name / task_key / f"{task_name}_test.csv"
+            if actual_model_name in file_paths:
+                test_path = file_paths[actual_model_name]['test']
+            else:
+                # Fallback to old method
+                test_path = pred_base_dir / actual_model_name / task_key / f"{task_name}_test.csv"
         elif model_name.startswith("multitask_"):
-            # Multitask model
-            actual_model_name = model_name.replace("multitask_", "")
-            test_path = pred_base_dir / actual_model_name / "test" / f"{mt_task_name}_test.csv"
+            # Multitask model - handle both 'multitask_multitask_*' and 'multitask_*' formats
+            if model_name.startswith("multitask_multitask_"):
+                actual_model_name = model_name.replace("multitask_", "", 1)  # Remove first occurrence
+            else:
+                actual_model_name = model_name  # Already correct format (e.g., 'multitask_all_chemprop')
+
+            if actual_model_name in file_paths:
+                test_path = file_paths[actual_model_name]['test']
+            else:
+                # Fallback to old method
+                test_path = pred_base_dir / actual_model_name / "test" / f"{mt_task_name}_test.csv"
         else:
-            continue
+            # Try using model_name directly (might be a multitask model without prefix issue)
+            if model_name in file_paths:
+                test_path = file_paths[model_name]['test']
+            else:
+                continue
 
         if not test_path.exists():
             print(f"  ⚠️  Test predictions not found: {test_path}")
@@ -735,12 +799,23 @@ def create_final_submission_from_optimization():
         print(f"\nGenerating test predictions for {task_key}...")
         print(f"Selected models: {selected_models}")
 
+        # Reconstruct file_paths from saved result if available
+        file_paths = None
+        if 'file_paths' in result:
+            file_paths = {}
+            for model_name, paths in result['file_paths'].items():
+                file_paths[model_name] = {
+                    'oof': PROJECT_ROOT / paths['oof'],
+                    'test': PROJECT_ROOT / paths['test']
+                }
+
         try:
             test_pred_df = generate_test_predictions_for_task(
                 task_key=task_key,
                 task_name=task_name,
                 mt_task_name=mt_task_name,
-                selected_models=selected_models
+                selected_models=selected_models,
+                file_paths=file_paths
             )
 
             # Save individual task submission
