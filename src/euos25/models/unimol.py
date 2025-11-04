@@ -1,7 +1,11 @@
 """Uni-Mol-2 model wrapper for binary classification and regression."""
 
+import hashlib
 import logging
 import os
+import pickle
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -15,6 +19,7 @@ from rdkit import Chem
 from rdkit.Chem import AllChem
 from torchmetrics import Metric
 from torchmetrics.utilities.data import dim_zero_cat
+from tqdm import tqdm
 
 from euos25.models.base import BaseClfModel
 
@@ -179,6 +184,133 @@ def collate_fn(batch):
         return coords_padded, atom_types_padded, mask
 
 
+def _process_single_smiles_worker(args: Tuple[int, str, bool, int, Optional[str]]) -> Tuple[int, Optional[np.ndarray], Optional[np.ndarray]]:
+    """Worker function for processing a single SMILES (for multiprocessing).
+
+    Args:
+        args: Tuple of (index, smiles, optimize_3d, max_attempts, cache_dir)
+
+    Returns:
+        Tuple of (index, coords, atom_types)
+    """
+    idx, smiles, optimize_3d, max_attempts, cache_dir = args
+
+    # Check cache first
+    if cache_dir:
+        cache_path = _get_cache_path(smiles, optimize_3d, max_attempts, cache_dir)
+        if cache_path and cache_path.exists():
+            try:
+                with open(cache_path, 'rb') as f:
+                    coords, atom_types = pickle.load(f)
+                    return idx, coords, atom_types
+            except Exception:
+                pass
+
+    # Generate 3D structure
+    coords, atom_types = _smiles_to_3d_worker(smiles, optimize_3d, max_attempts)
+
+    # Save to cache
+    if cache_dir and coords is not None and atom_types is not None:
+        cache_path = _get_cache_path(smiles, optimize_3d, max_attempts, cache_dir)
+        if cache_path:
+            try:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(cache_path, 'wb') as f:
+                    pickle.dump((coords, atom_types), f)
+            except Exception:
+                pass
+
+    return idx, coords, atom_types
+
+
+def _get_cache_path(smiles: str, optimize_3d: bool, max_attempts: int, cache_dir: str) -> Optional[Path]:
+    """Get cache file path for a SMILES string.
+
+    Args:
+        smiles: SMILES string
+        optimize_3d: Whether 3D optimization was used
+        max_attempts: Maximum attempts for embedding
+        cache_dir: Cache directory path
+
+    Returns:
+        Path to cache file or None
+    """
+    if not cache_dir:
+        return None
+
+    cache_key = hashlib.md5(
+        f"{smiles}_{optimize_3d}_{max_attempts}".encode()
+    ).hexdigest()
+    return Path(cache_dir) / f"{cache_key}.pkl"
+
+
+def _smiles_to_3d_worker(smiles: str, optimize_3d: bool, max_attempts: int) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """Convert SMILES to 3D coordinates (worker function for multiprocessing).
+
+    Args:
+        smiles: SMILES string
+        optimize_3d: Whether to optimize 3D structures
+        max_attempts: Maximum attempts for 3D structure generation
+
+    Returns:
+        Tuple of (coordinates, atom_types) or (None, None) if failed
+    """
+    try:
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            return None, None
+
+        # Add hydrogens
+        mol = Chem.AddHs(mol)
+
+        # Generate 3D coordinates with improved error handling
+        embed_result = AllChem.EmbedMolecule(mol, randomSeed=42, maxAttempts=max_attempts)
+
+        if embed_result == -1:
+            # If embedding failed, try with random coordinates
+            embed_result = AllChem.EmbedMolecule(
+                mol,
+                randomSeed=42,
+                maxAttempts=max_attempts,
+                useRandomCoords=True
+            )
+
+        if embed_result == -1:
+            # If still failed, try ETKDGv3
+            try:
+                params = AllChem.ETKDGv3()
+                params.randomSeed = 42
+                params.maxAttempts = max_attempts
+                embed_result = AllChem.EmbedMolecule(mol, params)
+            except Exception:
+                pass
+
+        # Optimize if requested and embedding succeeded
+        if embed_result != -1 and optimize_3d:
+            try:
+                AllChem.UFFOptimizeMolecule(mol)
+            except Exception:
+                # If UFF fails, try MMFF
+                try:
+                    AllChem.MMFFOptimizeMolecule(mol)
+                except Exception:
+                    pass
+
+        if embed_result == -1:
+            return None, None
+
+        # Get coordinates
+        conf = mol.GetConformer()
+        coords = conf.GetPositions()  # Shape: (n_atoms, 3)
+        atom_types = np.array([atom.GetAtomicNum() for atom in mol.GetAtoms()])
+
+        return coords.astype(np.float32), atom_types.astype(np.int64)
+
+    except Exception as e:
+        logger.debug(f"Error generating 3D structure for {smiles}: {e}")
+        return None, None
+
+
 class UniMolDataset(torch.utils.data.Dataset):
     """Dataset for Uni-Mol-2 that converts SMILES to 3D coordinates."""
 
@@ -187,7 +319,9 @@ class UniMolDataset(torch.utils.data.Dataset):
         smiles: List[str],
         labels: Optional[np.ndarray] = None,
         optimize_3d: bool = True,
-        max_attempts: int = 10,
+        max_attempts: int = 1000,
+        cache_dir: Optional[str] = None,
+        n_jobs: int = -1,
     ):
         """Initialize Uni-Mol dataset.
 
@@ -196,19 +330,44 @@ class UniMolDataset(torch.utils.data.Dataset):
             labels: Optional labels (shape: (n_samples,) or (n_samples, n_tasks))
             optimize_3d: Whether to optimize 3D structures
             max_attempts: Maximum attempts for 3D structure generation
+            cache_dir: Directory to cache 3D structures (optional)
+            n_jobs: Number of parallel jobs for 3D structure generation (1 = sequential, -1 = auto)
         """
         self.smiles = smiles
         self.labels = labels
         self.optimize_3d = optimize_3d
         self.max_attempts = max_attempts
+        self.cache_dir = cache_dir
+
+        # Auto-detect number of jobs if n_jobs = -1
+        if n_jobs == -1:
+            n_jobs = os.cpu_count() or 1
+            logger.info(f"Auto-detected number of CPU cores: {n_jobs}")
+        self.n_jobs = n_jobs
+
+        # Setup cache directory
+        if self.cache_dir:
+            cache_path = Path(self.cache_dir)
+            cache_path.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Using cache directory: {self.cache_dir}")
 
         # Generate 3D structures
         self.coords_list = []
         self.atom_types_list = []
         self.valid_indices = []
 
-        logger.info(f"Generating 3D structures for {len(smiles)} molecules...")
-        for idx, smi in enumerate(smiles):
+        logger.info(f"Generating 3D structures for {len(smiles)} molecules (n_jobs={n_jobs})...")
+
+        if n_jobs != 1:
+            self._generate_3d_parallel(smiles)
+        else:
+            self._generate_3d_sequential(smiles)
+
+        logger.info(f"Successfully generated 3D structures for {len(self.coords_list)}/{len(smiles)} molecules")
+
+    def _generate_3d_sequential(self, smiles: List[str]):
+        """Generate 3D structures sequentially with progress bar."""
+        for idx, smi in enumerate(tqdm(smiles, desc="Generating 3D structures")):
             coords, atom_types = self._smiles_to_3d(smi)
             if coords is not None and atom_types is not None:
                 self.coords_list.append(coords)
@@ -217,10 +376,40 @@ class UniMolDataset(torch.utils.data.Dataset):
             else:
                 logger.warning(f"Failed to generate 3D structure for SMILES {idx}: {smi}")
 
-        logger.info(f"Successfully generated 3D structures for {len(self.coords_list)}/{len(smiles)} molecules")
+    def _generate_3d_parallel(self, smiles: List[str]):
+        """Generate 3D structures in parallel with progress bar."""
+        # Prepare arguments for worker function
+        args_list = [
+            (idx, smi, self.optimize_3d, self.max_attempts, self.cache_dir)
+            for idx, smi in enumerate(smiles)
+        ]
+
+        # Process in parallel
+        results_dict = {}
+        with ProcessPoolExecutor(max_workers=self.n_jobs) as executor:
+            # Submit all tasks
+            future_to_idx = {
+                executor.submit(_process_single_smiles_worker, args): args[0]
+                for args in args_list
+            }
+
+            # Collect results with progress bar
+            for future in tqdm(as_completed(future_to_idx), total=len(args_list), desc="Generating 3D structures"):
+                idx, coords, atom_types = future.result()
+                results_dict[idx] = (coords, atom_types)
+
+        # Sort by index and store results
+        for idx in sorted(results_dict.keys()):
+            coords, atom_types = results_dict[idx]
+            if coords is not None and atom_types is not None:
+                self.coords_list.append(coords)
+                self.atom_types_list.append(atom_types)
+                self.valid_indices.append(idx)
+            else:
+                logger.warning(f"Failed to generate 3D structure for SMILES {idx}: {smiles[idx]}")
 
     def _smiles_to_3d(self, smiles: str) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-        """Convert SMILES to 3D coordinates.
+        """Convert SMILES to 3D coordinates (with caching support).
 
         Args:
             smiles: SMILES string
@@ -228,38 +417,32 @@ class UniMolDataset(torch.utils.data.Dataset):
         Returns:
             Tuple of (coordinates, atom_types) or (None, None) if failed
         """
-        try:
-            mol = Chem.MolFromSmiles(smiles)
-            if mol is None:
-                return None, None
-
-            # Add hydrogens
-            mol = Chem.AddHs(mol)
-
-            # Generate 3D coordinates
-            AllChem.EmbedMolecule(mol, randomSeed=42, maxAttempts=self.max_attempts)
-
-            # Optimize if requested
-            if self.optimize_3d:
+        # Check cache first
+        if self.cache_dir:
+            cache_path = _get_cache_path(smiles, self.optimize_3d, self.max_attempts, self.cache_dir)
+            if cache_path and cache_path.exists():
                 try:
-                    AllChem.MMFFOptimizeMolecule(mol)
+                    with open(cache_path, 'rb') as f:
+                        coords, atom_types = pickle.load(f)
+                        return coords, atom_types
                 except Exception:
-                    # If MMFF fails, try UFF
-                    try:
-                        AllChem.UFFOptimizeMolecule(mol)
-                    except Exception:
-                        pass
+                    pass
 
-            # Get coordinates
-            conf = mol.GetConformer()
-            coords = conf.GetPositions()  # Shape: (n_atoms, 3)
-            atom_types = np.array([atom.GetAtomicNum() for atom in mol.GetAtoms()])
+        # Generate 3D structure
+        coords, atom_types = _smiles_to_3d_worker(smiles, self.optimize_3d, self.max_attempts)
 
-            return coords.astype(np.float32), atom_types.astype(np.int64)
+        # Save to cache
+        if self.cache_dir and coords is not None and atom_types is not None:
+            cache_path = _get_cache_path(smiles, self.optimize_3d, self.max_attempts, self.cache_dir)
+            if cache_path:
+                try:
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    with open(cache_path, 'wb') as f:
+                        pickle.dump((coords, atom_types), f)
+                except Exception:
+                    pass
 
-        except Exception as e:
-            logger.debug(f"Error generating 3D structure for {smiles}: {e}")
-            return None, None
+        return coords, atom_types
 
     def __len__(self):
         return len(self.coords_list)
@@ -498,6 +681,8 @@ class UniMolModel(BaseClfModel):
         early_stopping_metric: str = "roc_auc",
         n_tasks: int = 1,
         binary_labels: Optional[np.ndarray] = None,
+        cache_dir: Optional[str] = None,
+        n_jobs: int = -1,
         **kwargs,
     ):
         """Initialize Uni-Mol-2 model.
@@ -527,6 +712,8 @@ class UniMolModel(BaseClfModel):
             early_stopping_metric: Metric to monitor for early stopping
             n_tasks: Number of tasks for multi-task learning
             binary_labels: Binary labels (0/1) for ROC AUC calculation in regression/ranking mode
+            cache_dir: Directory to cache 3D structures (optional)
+            n_jobs: Number of parallel jobs for 3D structure generation (1 = sequential, -1 = auto)
             **kwargs: Additional parameters
         """
         if not UNIMOL_AVAILABLE:
@@ -558,6 +745,8 @@ class UniMolModel(BaseClfModel):
         self.early_stopping_metric = early_stopping_metric
         self.n_tasks = n_tasks
         self.binary_labels = binary_labels
+        self.cache_dir = cache_dir
+        self.n_jobs = n_jobs
 
         # Determine accelerator
         if accelerator is None or accelerator == "auto":
@@ -800,7 +989,13 @@ class UniMolModel(BaseClfModel):
 
         # Create datasets
         train_smiles = X_train["SMILES"].tolist()
-        train_dataset = UniMolDataset(train_smiles, y_train, optimize_3d=self.optimize_3d)
+        train_dataset = UniMolDataset(
+            train_smiles,
+            y_train,
+            optimize_3d=self.optimize_3d,
+            cache_dir=self.cache_dir,
+            n_jobs=self.n_jobs,
+        )
         train_loader = torch.utils.data.DataLoader(
             train_dataset,
             batch_size=self.batch_size,
@@ -812,7 +1007,13 @@ class UniMolModel(BaseClfModel):
         val_loader = None
         if X_val is not None and y_val is not None:
             val_smiles = X_val["SMILES"].tolist()
-            val_dataset = UniMolDataset(val_smiles, y_val, optimize_3d=self.optimize_3d)
+            val_dataset = UniMolDataset(
+                val_smiles,
+                y_val,
+                optimize_3d=self.optimize_3d,
+                cache_dir=self.cache_dir,
+                n_jobs=self.n_jobs,
+            )
             val_loader = torch.utils.data.DataLoader(
                 val_dataset,
                 batch_size=self.batch_size,
@@ -940,7 +1141,13 @@ class UniMolModel(BaseClfModel):
 
         # Create dataset and dataloader
         smiles = X["SMILES"].tolist()
-        dataset = UniMolDataset(smiles, labels=None, optimize_3d=self.optimize_3d)
+        dataset = UniMolDataset(
+            smiles,
+            labels=None,
+            optimize_3d=self.optimize_3d,
+            cache_dir=self.cache_dir,
+            n_jobs=self.n_jobs,
+        )
         test_loader = torch.utils.data.DataLoader(
             dataset, batch_size=self.batch_size, shuffle=False, num_workers=0, collate_fn=collate_fn
         )
@@ -1006,6 +1213,21 @@ class UniMolModel(BaseClfModel):
 
         self.trainer.save_checkpoint(path)
         logger.info(f"Model saved to {path}")
+
+    @classmethod
+    def load(cls, path: str) -> "UniMolModel":
+        """Load model from file.
+
+        This is a convenience method that delegates to load_from_checkpoint.
+        For more control over loading parameters, use load_from_checkpoint directly.
+
+        Args:
+            path: Path to load model from (checkpoint file or directory)
+
+        Returns:
+            Loaded UniMolModel instance
+        """
+        return cls.load_from_checkpoint(path)
 
     @classmethod
     def load_from_checkpoint(
@@ -1086,6 +1308,8 @@ class UniMolModel(BaseClfModel):
             early_stopping_rounds=model_params.get("early_stopping_rounds", None),
             early_stopping_metric=model_params.get("early_stopping_metric", "roc_auc"),
             n_tasks=model_params.get("n_tasks", 1),
+            cache_dir=model_params.get("cache_dir", None),
+            n_jobs=model_params.get("n_jobs", -1),
         )
 
         # Load checkpoint into model using Lightning's load_from_checkpoint
@@ -1150,6 +1374,8 @@ class UniMolModel(BaseClfModel):
                 "early_stopping_rounds": self.early_stopping_rounds,
                 "early_stopping_metric": self.early_stopping_metric,
                 "n_tasks": self.n_tasks,
+                "cache_dir": self.cache_dir,
+                "n_jobs": self.n_jobs,
             }
         )
         return params
