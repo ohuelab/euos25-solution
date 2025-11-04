@@ -11,6 +11,8 @@ import torch
 from chemprop import data, featurizers, models, nn
 from lightning import pytorch as pl
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
+from torchmetrics import Metric
+from torchmetrics.utilities.data import dim_zero_cat
 
 from euos25.models.base import BaseClfModel
 
@@ -22,6 +24,92 @@ if "KMP_DUPLICATE_LIB_OK" not in os.environ:
     os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 if "OMP_NUM_THREADS" not in os.environ:
     os.environ["OMP_NUM_THREADS"] = "1"
+
+
+class BinaryROCAUCMetric(Metric):
+    """Custom ROC AUC metric that uses binary labels for regression/ranking.
+
+    This metric computes ROC AUC using binary labels (0/1) even when
+    the model is trained with regression or ranking objectives.
+    """
+
+    def __init__(self, binary_labels: Optional[torch.Tensor] = None):
+        """Initialize Binary ROC AUC Metric.
+
+        Args:
+            binary_labels: Binary labels (0/1) for ROC AUC calculation.
+                          If None, uses the target values directly.
+        """
+        super().__init__()
+        self.add_state("preds", default=[], dist_reduce_fx="cat")
+        self.add_state("indices", default=[], dist_reduce_fx="cat")
+        self.binary_labels = binary_labels
+        self.current_idx = 0
+
+    def reset(self):
+        """Reset metric state."""
+        super().reset()
+        self.current_idx = 0
+
+    def update(self, preds: torch.Tensor, targets: torch.Tensor):
+        """Update metric state.
+
+        Args:
+            preds: Predictions (probabilities after sigmoid)
+            targets: Target values (quantitative values for regression/ranking)
+        """
+        # Flatten if multi-dimensional
+        if preds.dim() > 1:
+            preds = preds.flatten()
+        if targets.dim() > 1:
+            targets = targets.flatten()
+
+        batch_size = len(preds)
+        indices = torch.arange(self.current_idx, self.current_idx + batch_size, device=preds.device)
+        self.current_idx += batch_size
+
+        self.preds.append(preds)
+        self.indices.append(indices)
+
+    def compute(self) -> torch.Tensor:
+        """Compute ROC AUC.
+
+        Returns:
+            ROC AUC score
+        """
+        from torchmetrics.functional.classification import (
+            binary_auroc,
+        )
+
+        preds = dim_zero_cat(self.preds)
+        indices = dim_zero_cat(self.indices)
+
+        # Use binary labels if provided, otherwise use targets directly
+        if self.binary_labels is not None:
+            # Map indices to binary labels
+            indices_np = indices.cpu().numpy().astype(int)
+            if len(self.binary_labels) > indices_np.max():
+                targets = torch.from_numpy(self.binary_labels[indices_np]).to(preds.device)
+            else:
+                logger.warning(
+                    f"Binary labels length ({len(self.binary_labels)}) "
+                    f"is less than max index ({indices_np.max()}). "
+                    "Using 0.5 threshold on predictions."
+                )
+                targets = (preds > 0.5).long()
+        else:
+            # Fallback: use 0.5 threshold
+            targets = (preds > 0.5).long()
+
+        # Ensure targets are binary
+        if targets.dtype != torch.bool and targets.dtype != torch.long:
+            targets = (targets > 0.5).long()
+
+        try:
+            return binary_auroc(preds, targets)
+        except Exception as e:
+            logger.warning(f"Error computing ROC AUC: {e}. Returning 0.5")
+            return torch.tensor(0.5, device=preds.device)
 
 
 class ChemPropModel(BaseClfModel):
@@ -47,12 +135,14 @@ class ChemPropModel(BaseClfModel):
         use_focal_loss: bool = False,
         focal_alpha: float = 0.25,
         focal_gamma: float = 2.0,
+        objective_type: Optional[str] = None,  # "regression", "listmle", or None (binary)
         checkpoint_dir: Optional[str] = None,
         random_seed: int = 42,
         accelerator: Optional[str] = None,
         early_stopping_rounds: Optional[int] = None,
         early_stopping_metric: str = "roc_auc",
         n_tasks: int = 1,
+        binary_labels: Optional[np.ndarray] = None,  # Binary labels for ROC AUC (regression/ranking)
         **kwargs,
     ):
         """Initialize ChemProp model.
@@ -72,6 +162,7 @@ class ChemPropModel(BaseClfModel):
             use_focal_loss: Whether to use Focal loss for imbalanced data
             focal_alpha: Alpha parameter for focal loss (weighting factor)
             focal_gamma: Gamma parameter for focal loss (focusing parameter)
+            objective_type: Objective type ("regression", "listmle", or None for binary)
             checkpoint_dir: Directory to save model checkpoints
             random_seed: Random seed for reproducibility
             accelerator: Accelerator to use ('auto', 'cpu', 'cuda', 'mps').
@@ -81,6 +172,7 @@ class ChemPropModel(BaseClfModel):
                                   If None, early stopping is disabled.
             early_stopping_metric: Metric to monitor for early stopping ('roc_auc', 'pr_auc', etc.)
             n_tasks: Number of tasks for multi-task learning (default 1 for single task)
+            binary_labels: Binary labels (0/1) for ROC AUC calculation in regression/ranking mode
             **kwargs: Additional parameters
         """
         super().__init__(name="chemprop", **kwargs)
@@ -98,11 +190,13 @@ class ChemPropModel(BaseClfModel):
         self.use_focal_loss = use_focal_loss
         self.focal_alpha = focal_alpha
         self.focal_gamma = focal_gamma
+        self.objective_type = objective_type
         self.checkpoint_dir = checkpoint_dir or "checkpoints/chemprop"
         self.random_seed = random_seed
         self.early_stopping_rounds = early_stopping_rounds
         self.early_stopping_metric = early_stopping_metric
         self.n_tasks = n_tasks
+        self.binary_labels = binary_labels
 
         # Determine accelerator
         if accelerator is None or accelerator == "auto":
@@ -262,7 +356,29 @@ class ChemPropModel(BaseClfModel):
         # Feed-forward network
         # For binary classification, we use n_tasks (1 for single task, >1 for multi-task)
         # input_dim should match the output dimension of message passing
-        if self.use_focal_loss:
+        if self.objective_type == "regression":
+            logger.info("Using RegressionFFN for regression objective")
+            ffn = nn.RegressionFFN(
+                n_tasks=self.n_tasks,
+                input_dim=mp.output_dim,
+                hidden_dim=self.hidden_size,
+                n_layers=self.ffn_num_layers,
+                dropout=self.dropout,
+                output_transform=output_transform,
+            )
+        elif self.objective_type == "listmle":
+            logger.info("Using ListMLE FFN for ranking objective")
+            from euos25.models.chemprop_listmle import create_listmle_ffn
+
+            ffn = create_listmle_ffn(
+                n_tasks=self.n_tasks,
+                input_dim=mp.output_dim,
+                hidden_dim=self.hidden_size,
+                n_layers=self.ffn_num_layers,
+                dropout=self.dropout,
+                output_transform=output_transform,
+            )
+        elif self.use_focal_loss:
             from euos25.models.chemprop_focal import create_focal_loss_ffn
 
             ffn = create_focal_loss_ffn(
@@ -286,7 +402,21 @@ class ChemPropModel(BaseClfModel):
             )
 
         # Metrics
-        metric_list = [nn.metrics.BinaryAUROC(), nn.metrics.BinaryAccuracy()]
+        # For regression/ranking, use binary labels for ROC AUC if available
+        if self.objective_type in ["regression", "listmle"] and self.binary_labels is not None:
+            # Convert binary_labels to torch tensor for metric
+            binary_labels_tensor = torch.from_numpy(self.binary_labels).float()
+            # Create metric with binary labels
+            roc_metric = BinaryROCAUCMetric(binary_labels=binary_labels_tensor)
+            # Reset metric state for fresh computation
+            roc_metric.reset()
+            metric_list = [
+                roc_metric,
+                nn.metrics.BinaryAccuracy(),
+            ]
+            logger.info("Using BinaryROCAUCMetric with binary labels for regression/ranking")
+        else:
+            metric_list = [nn.metrics.BinaryAUROC(), nn.metrics.BinaryAccuracy()]
 
         # Build MPNN
         mpnn = models.MPNN(
@@ -305,6 +435,7 @@ class ChemPropModel(BaseClfModel):
         y_train: np.ndarray,
         X_val: Optional[pd.DataFrame] = None,
         y_val: Optional[np.ndarray] = None,
+        binary_labels_val: Optional[np.ndarray] = None,
         resume_from_checkpoint: Optional[str] = None,
     ) -> "ChemPropModel":
         """Train the ChemProp model.
@@ -314,6 +445,8 @@ class ChemPropModel(BaseClfModel):
             y_train: Training labels
             X_val: Validation features (optional)
             y_val: Validation labels (optional)
+            binary_labels_val: Binary labels (0/1) for validation set ROC AUC calculation
+                              (used with regression/ranking objectives)
             resume_from_checkpoint: Path to checkpoint file to resume training from.
                                    If None, training starts from scratch.
 
@@ -324,6 +457,12 @@ class ChemPropModel(BaseClfModel):
             logger.info(f"Resuming training from checkpoint: {resume_from_checkpoint}")
         else:
             logger.info("Training ChemProp model")
+
+        # Store validation binary labels for metric
+        if binary_labels_val is not None:
+            self.binary_labels_val = binary_labels_val
+        else:
+            self.binary_labels_val = None
 
         # Initialize featurizer
         self.featurizer = featurizers.SimpleMoleculeMolGraphFeaturizer()
@@ -341,8 +480,13 @@ class ChemPropModel(BaseClfModel):
                 val_smiles, y_val, shuffle=False, normalize=False
             )
 
-        # Build model
+        # Build model (use validation binary labels if available)
+        if self.binary_labels_val is not None:
+            original_binary_labels = self.binary_labels
+            self.binary_labels = self.binary_labels_val
         self.model = self._build_model()
+        if self.binary_labels_val is not None:
+            self.binary_labels = original_binary_labels
 
         # Map early_stopping_metric to PyTorch Lightning metric name
         metric_name_map = {
@@ -510,7 +654,13 @@ class ChemPropModel(BaseClfModel):
 
         # Convert to numpy array
         # predictions is a list of tensors from each batch
-        probs = torch.cat(predictions).cpu().numpy()
+        probs = torch.cat(predictions)
+
+        # For regression/ranking, apply sigmoid to convert logits to probabilities
+        if self.objective_type in ["regression", "listmle"]:
+            probs = torch.sigmoid(probs)
+
+        probs = probs.cpu().numpy()
 
         # Ensure correct shape
         n_samples = len(X)

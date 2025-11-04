@@ -18,16 +18,24 @@ logger = logging.getLogger(__name__)
 
 
 def load_multitask_labels(
-    task_names: List[str], data_dir: str = "data/raw"
-) -> Tuple[pd.DataFrame, List[str]]:
+    task_names: List[str],
+    data_dir: str = "data/raw",
+    use_quantitative: bool = False,
+    quantitative_normalize: bool = True,
+) -> Tuple[pd.DataFrame, pd.DataFrame, List[str]]:
     """Load labels for multiple tasks.
 
     Args:
         task_names: List of task names (e.g., ["transmittance340", "transmittance570"])
         data_dir: Directory containing raw data files
+        use_quantitative: Whether to use quantitative values for trans tasks
+        quantitative_normalize: Whether to normalize quantitative values
 
     Returns:
-        Tuple of (labels_df, column_names) where labels_df has columns for each task
+        Tuple of (labels_df, binary_labels_df, column_names) where:
+        - labels_df: Quantitative labels for regression/ranking (or binary for classification)
+        - binary_labels_df: Binary labels (0/1) for ROC AUC calculation
+        - column_names: List of task names
     """
     data_dir = Path(data_dir)
 
@@ -41,6 +49,7 @@ def load_multitask_labels(
 
     # Load each task's labels
     all_labels = []
+    all_binary_labels = []
     common_ids = None
 
     for task_name in task_names:
@@ -78,10 +87,36 @@ def load_multitask_labels(
         # Set index to ID column
         df = df.set_index(id_col)
 
-        # Get labels
-        labels = df[label_col].rename(task_name)
+        # Get binary labels
+        binary_labels = df[label_col].rename(task_name)
+
+        # Get quantitative labels if needed (for trans tasks)
+        if use_quantitative and "transmittance" in task_name.lower():
+            quantitative_col = "Transmittance.1"
+            if quantitative_col in df.columns:
+                quantitative_values = df[quantitative_col].rename(task_name)
+                # Normalize quantitative values
+                if quantitative_normalize:
+                    q_min = quantitative_values.min()
+                    q_max = quantitative_values.max()
+                    if q_max > q_min:
+                        # Normalize: labels = - (quantitative_values - q_min) / (q_max - q_min)
+                        # (smaller values are positive)
+                        quantitative_values = -(quantitative_values - q_min) / (q_max - q_min)
+                        logger.info(f"Normalized quantitative values for {task_name}: min={q_min:.4f}, max={q_max:.4f}")
+                    else:
+                        quantitative_values = quantitative_values
+                        logger.warning(f"Quantitative values are constant for {task_name}, using as-is")
+                labels = quantitative_values
+            else:
+                logger.warning(f"Quantitative column {quantitative_col} not found for {task_name}, using binary labels")
+                labels = binary_labels
+        else:
+            # For fluo tasks or when not using quantitative, use binary labels directly
+            labels = binary_labels
 
         all_labels.append(labels)
+        all_binary_labels.append(binary_labels)
 
         # Find common IDs across all tasks
         if common_ids is None:
@@ -94,14 +129,17 @@ def load_multitask_labels(
     labels_df = pd.DataFrame(
         {task: labels.loc[common_ids] for task, labels in zip(task_names, all_labels)}
     )
+    binary_labels_df = pd.DataFrame(
+        {task: labels.loc[common_ids] for task, labels in zip(task_names, all_binary_labels)}
+    )
 
     logger.info(f"Loaded {len(labels_df)} samples with labels for {len(task_names)} tasks")
     logger.info(f"Task names: {task_names}")
     for task in task_names:
-        pos_count = labels_df[task].sum()
-        logger.info(f"  {task}: {pos_count}/{len(labels_df)} positive samples")
+        pos_count = binary_labels_df[task].sum()
+        logger.info(f"  {task}: {pos_count}/{len(binary_labels_df)} positive samples")
 
-    return labels_df, task_names
+    return labels_df, binary_labels_df, task_names
 
 
 def train_multitask_fold(
@@ -112,6 +150,7 @@ def train_multitask_fold(
     config: Config,
     fold_idx: int,
     output_dir: Optional[Path] = None,
+    binary_labels_valid: Optional[np.ndarray] = None,
 ) -> Tuple[ChemPropModel, Dict[str, float]]:
     """Train multi-task model on single fold.
 
@@ -123,6 +162,8 @@ def train_multitask_fold(
         config: Pipeline configuration
         fold_idx: Fold index
         output_dir: Directory to save model (optional)
+        binary_labels_valid: Binary labels (0/1) for validation set ROC AUC calculation
+                            (n_samples, n_tasks) - used with regression/ranking objectives
 
     Returns:
         Tuple of (trained_model, metrics_dict)
@@ -215,6 +256,10 @@ def train_multitask_fold(
     model_params["early_stopping_rounds"] = config.early_stopping_rounds
     model_params["early_stopping_metric"] = config.early_stopping_metric
 
+    # Add objective_type if specified
+    if config.model.objective_type is not None:
+        model_params["objective_type"] = config.model.objective_type
+
     if checkpoint_dir is not None:
         model_params["checkpoint_dir"] = checkpoint_dir
 
@@ -226,19 +271,34 @@ def train_multitask_fold(
 
     model = ChemPropModel(**model_params)
 
-    # Train model
-    model.fit(X_train, y_train, X_val=X_valid, y_val=y_valid)
+    # Train model - pass binary_labels_val if available
+    fit_kwargs = {
+        "X_train": X_train,
+        "y_train": y_train,
+        "X_val": X_valid,
+        "y_val": y_valid,
+    }
+    if binary_labels_valid is not None:
+        fit_kwargs["binary_labels_val"] = binary_labels_valid
+    model.fit(**fit_kwargs)
 
     # Predict on validation - returns (n_samples, n_tasks) for multi-task
     y_pred = model.predict_proba(X_valid)
 
     # Calculate metrics per task
+    # Use binary_labels_valid for regression/ranking (ROC-AUC calculation)
     metrics = {}
     for task_idx, task_name in enumerate(config.task_names):
         # For multi-task, y_pred is (n_samples, n_tasks) - probabilities of positive class for each task
         task_pred_proba = y_pred[:, task_idx]
+        # Use binary labels for metrics if available (for regression/ranking)
+        y_valid_for_metrics = (
+            binary_labels_valid[:, task_idx]
+            if binary_labels_valid is not None
+            else y_valid[:, task_idx]
+        )
         task_metrics = calc_metrics(
-            y_valid[:, task_idx], task_pred_proba, metrics=config.metrics
+            y_valid_for_metrics, task_pred_proba, metrics=config.metrics
         )
 
         for metric_name, score in task_metrics.items():
@@ -268,6 +328,7 @@ def train_multitask_cv(
     labels_df: pd.DataFrame,
     config: Config,
     output_dir: str,
+    binary_labels_df: Optional[pd.DataFrame] = None,
 ) -> Tuple[List[Dict[str, float]], List[int]]:
     """Train multi-task models with cross-validation.
 
@@ -277,6 +338,8 @@ def train_multitask_cv(
         labels_df: DataFrame with labels for each task (columns = task names)
         config: Pipeline configuration
         output_dir: Directory to save models and metrics
+        binary_labels_df: DataFrame with binary labels (0/1) for ROC AUC calculation
+                         (columns = task names) - used with regression/ranking objectives
 
     Returns:
         Tuple of (fold_metrics, best_iterations)
@@ -323,6 +386,11 @@ def train_multitask_cv(
         y_train = labels_df.loc[train_common, config.task_names].values
         y_valid = labels_df.loc[valid_common, config.task_names].values
 
+        # Get binary labels if available
+        binary_labels_valid = None
+        if binary_labels_df is not None:
+            binary_labels_valid = binary_labels_df.loc[valid_common, config.task_names].values
+
         X_train = X_train.loc[train_common]
         X_valid = X_valid.loc[valid_common]
 
@@ -335,6 +403,7 @@ def train_multitask_cv(
             config,
             fold_idx,
             output_dir=output_path,
+            binary_labels_valid=binary_labels_valid,
         )
 
         fold_metrics.append(metrics)
@@ -431,8 +500,17 @@ def main():
     logger.info(f"Tasks: {config.task_names}")
     logger.info(f"Model: {config.model.name}")
 
+    # Check if using quantitative values
+    use_quantitative = config.imbalance.use_quantitative if config.imbalance else False
+    quantitative_normalize = config.imbalance.quantitative_normalize if config.imbalance else True
+
     # Load multi-task labels
-    labels_df, task_names = load_multitask_labels(config.task_names, args.data_dir)
+    labels_df, binary_labels_df, task_names = load_multitask_labels(
+        config.task_names,
+        args.data_dir,
+        use_quantitative=use_quantitative,
+        quantitative_normalize=quantitative_normalize,
+    )
 
     # Train with cross-validation
     fold_metrics, best_iterations = train_multitask_cv(
@@ -441,6 +519,7 @@ def main():
         labels_df,
         config,
         args.output,
+        binary_labels_df=binary_labels_df,
     )
 
     logger.info("Training completed successfully!")

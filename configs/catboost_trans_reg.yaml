@@ -1,0 +1,60 @@
+# Full Chemeleon+CatBoost with Transmittance (quantitative) regression configuration
+# Uses Chemeleon embeddings as features for CatBoost with regression objective
+
+seed: 42
+folds: 5
+scaffold_min_size: 10
+
+# Task configuration
+task: "transmittance340"
+metrics:
+  - "roc_auc"
+  - "pr_auc"
+
+# Featurizers - Chemeleon embeddings
+featurizers:
+  - name: ecfp
+    params:
+      radius: 3
+      n_bits: 2048
+      use_counts: true
+  - name: rdkit2d
+    params: {}
+  - name: conj_proxy
+    params:
+      L_cut: 4
+
+# Model configuration - CatBoost with regression objective
+model:
+  name: "catboost"
+  objective_type: "regression"
+  params:
+    n_estimators: 1000
+    learning_rate: 0.03
+    max_depth: 6
+    subsample: 0.8
+    colsample_bylevel: 0.8
+    min_data_in_leaf: 20
+    l2_leaf_reg: 3.0
+
+# Imbalance handling - Use quantitative values
+imbalance:
+  use_pos_weight: false
+  use_focal_loss: false
+  use_quantitative: true
+  quantitative_normalize: true
+
+# Early stopping
+early_stopping_rounds: 200
+early_stopping_metric: "roc_auc"
+
+# Logging
+log_level: "INFO"
+
+# Optuna hyperparameter tuning configuration (disabled)
+optuna:
+  enable: false
+
+# Note: Chemeleon foundation model weights (chemeleon_mp.pt) must be downloaded separately
+# See: https://chemprop.readthedocs.io/en/latest/chemeleon_foundation_finetuning.html
+

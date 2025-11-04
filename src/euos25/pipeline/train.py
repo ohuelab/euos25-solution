@@ -86,6 +86,10 @@ def create_model(config: Config, checkpoint_dir: Optional[str] = None) -> ClfMod
             model_params["focal_alpha"] = config.imbalance.focal_alpha
             model_params["focal_gamma"] = config.imbalance.focal_gamma
 
+        # Add objective_type from config
+        if config.model.objective_type is not None:
+            model_params["objective_type"] = config.model.objective_type
+
         # Add random_seed from config
         model_params["random_seed"] = config.seed
 
@@ -229,14 +233,24 @@ def train_fold(
     model = create_model(config, checkpoint_dir=checkpoint_dir)
 
     # Set binary_labels for regression/ranking if provided
-    if binary_labels_train is not None and config.model.name == "lgbm":
+    if binary_labels_train is not None and config.model.name in ["lgbm", "catboost"]:
         if hasattr(model, '_binary_labels'):
             model._binary_labels = binary_labels_train
 
     # Train model - handle different model signatures
     if config.model.name == "chemprop":
         # ChemProp uses X_val and y_val instead of eval_set
-        model.fit(X_train, y_train, X_val=X_valid, y_val=y_valid, resume_from_checkpoint=resume_ckpt)
+        # Pass binary_labels_val for regression/ranking
+        fit_kwargs = {
+            "X_train": X_train,
+            "y_train": y_train,
+            "X_val": X_valid,
+            "y_val": y_valid,
+            "resume_from_checkpoint": resume_ckpt,
+        }
+        if binary_labels_valid is not None:
+            fit_kwargs["binary_labels_val"] = binary_labels_valid
+        model.fit(**fit_kwargs)
     elif config.model.name == "random_forest":
         # RandomForest doesn't use eval_set (no early stopping)
         model.fit(X_train, y_train, eval_set=None)
@@ -248,7 +262,7 @@ def train_fold(
             "y": y_train,
             "eval_set": (X_valid, y_valid),
         }
-        if binary_labels_valid is not None and config.model.name == "lgbm":
+        if binary_labels_valid is not None and config.model.name in ["lgbm", "catboost"]:
             fit_kwargs["binary_labels_valid"] = binary_labels_valid
         model.fit(**fit_kwargs)
 
