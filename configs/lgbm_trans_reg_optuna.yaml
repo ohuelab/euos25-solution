@@ -1,5 +1,5 @@
-# Full Chemeleon+LGBM configuration
-# Uses Chemeleon embeddings as features for LightGBM
+# Full Chemeleon+LGBM with Transmittance (quantitative) regression configuration (with Optuna)
+# Uses Chemeleon embeddings as features for LightGBM with regression objective
 
 seed: 42
 folds: 5
@@ -12,7 +12,6 @@ metrics:
   - "pr_auc"
 
 # Featurizers - Chemeleon embeddings
-
 featurizers:
   - name: ecfp
     params:
@@ -21,24 +20,14 @@ featurizers:
       use_counts: true
   - name: rdkit2d
     params: {}
-  - name: mordred
-    params:
-      ignore_3d: true
-  - name: chemeleon
-    params:
-      chemeleon_path: "data/pretrained/chemeleon_mp.pt"
-      aggregation: "mean"
-      device: null  # Auto-detect (cuda/mps/cpu)
   - name: conj_proxy
     params:
       L_cut: 4
-  - name: chemberta
-    params:
-      pooling: mean
 
-# Model configuration - LightGBM
+# Model configuration - LightGBM with regression objective
 model:
   name: "lgbm"
+  objective_type: "regression"
   params:
     n_estimators: 1000
     # Parameters below will be tuned by Optuna
@@ -51,15 +40,15 @@ model:
     reg_alpha: 0.1
     reg_lambda: 0.1
 
-# Imbalance handling
+# Imbalance handling - Use quantitative values
 imbalance:
-  use_pos_weight: true
-  pos_weight_from_data: true
-  use_sampling: false
+  use_pos_weight: false
   use_focal_loss: false
+  use_quantitative: true
+  quantitative_normalize: true
 
 # Early stopping
-early_stopping_rounds: 30
+early_stopping_rounds: 200
 early_stopping_metric: "roc_auc"
 
 # Logging
@@ -70,7 +59,7 @@ optuna:
   enable: true
   n_trials: 100
   timeout: null  # No timeout (in seconds)
-  study_name: chemeleon_lgbm_tuning
+  study_name: chemeleon_lgbm_regression_tuning
 
   # LGBM parameters to tune
   # Any parameter not listed here will use the fixed value from model.params
@@ -92,11 +81,9 @@ optuna:
       min: 0.001
       max: 1.0
       log: true
-  pos_weight_params:
-    pos_weight_multiplier:
-      type: float
-      min: 0.5
-      max: 2.0
+  feature_groups:
+    tune: false
 
 # Note: Chemeleon foundation model weights (chemeleon_mp.pt) must be downloaded separately
 # See: https://chemprop.readthedocs.io/en/latest/chemeleon_foundation_finetuning.html
+

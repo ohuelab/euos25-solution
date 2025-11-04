@@ -135,7 +135,39 @@ def train(features, splits, config, outdir, label_col, data, task):
     if label_col not in df.columns:
         raise ValueError(f"Label column {label_col} not found")
 
-    labels = df.set_index("ID")[label_col]
+    # Check if using quantitative values
+    use_quantitative = cfg.imbalance.use_quantitative if cfg.imbalance else False
+    quantitative_normalize = cfg.imbalance.quantitative_normalize if cfg.imbalance else True
+
+    if use_quantitative and label_col == "Transmittance":
+        # Load quantitative column
+        quantitative_col = "Transmittance (quantitative)"
+        if quantitative_col not in df.columns:
+            raise ValueError(f"Quantitative column {quantitative_col} not found")
+
+        # Get quantitative values
+        quantitative_values = df.set_index("ID")[quantitative_col]
+
+        # Normalize quantitative values to 0-1 range
+        if quantitative_normalize:
+            q_min = quantitative_values.min()
+            q_max = quantitative_values.max()
+            if q_max > q_min:
+                labels = (quantitative_values - q_min) / (q_max - q_min)
+                logger.info(f"Normalized quantitative values: min={q_min:.4f}, max={q_max:.4f}")
+            else:
+                labels = quantitative_values
+                logger.warning("Quantitative values are constant, using as-is")
+        else:
+            labels = quantitative_values
+
+        # Store binary labels for ROC-AUC calculation
+        binary_labels = df.set_index("ID")[label_col]
+        # Store binary labels in config for later use
+        cfg._binary_labels = binary_labels
+    else:
+        labels = df.set_index("ID")[label_col]
+        cfg._binary_labels = None
 
     # Check if Optuna mode is enabled
     feature_group_settings = None

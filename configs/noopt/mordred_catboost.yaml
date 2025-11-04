@@ -1,0 +1,48 @@
+seed: 42
+folds: 5
+scaffold_min_size: 10
+
+featurizers:
+  - name: mordred
+    params:
+      ignore_3d: true
+      n_jobs: 48
+
+model:
+  name: catboost
+  params:
+    n_estimators: 1000
+    learning_rate: 0.03
+    max_depth: 6
+    subsample: 0.8
+    colsample_bylevel: 0.8
+    min_data_in_leaf: 20
+    l2_leaf_reg: 3.0
+
+imbalance:
+  use_pos_weight: true
+  pos_weight_from_data: true
+
+plates:
+  normalize: false
+
+task: y_fluo_any
+metrics:
+  - roc_auc
+  - pr_auc
+
+early_stopping_rounds: 200
+early_stopping_metric: roc_auc
+
+log_level: INFO
+
+# Optuna hyperparameter tuning configuration
+optuna:
+  enable: false  # Set to true to enable hyperparameter tuning
+  n_trials: 100
+  timeout: null
+  study_name: full_catboost_tuning
+
+  catboost_params: {}  # Add parameters to tune here
+  pos_weight_params: {}  # Add pos_weight_multiplier tuning here if needed
+

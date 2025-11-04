@@ -21,6 +21,7 @@ class ModelConfig(BaseModel):
 
     name: str
     params: Dict[str, Any] = Field(default_factory=dict)
+    objective_type: Optional[str] = None  # "regression", "listmle", or None (default binary)
 
 
 class ImbalanceConfig(BaseModel):
@@ -35,6 +36,8 @@ class ImbalanceConfig(BaseModel):
     use_focal_loss: bool = False
     focal_alpha: Optional[float] = None  # Auto-computed from data if None
     focal_gamma: float = 2.0  # Focusing parameter (typically 2-3)
+    use_quantitative: bool = False  # Use Transmittance (quantitative) for regression/ranking
+    quantitative_normalize: bool = True  # Normalize quantitative values to 0-1
 
 
 class PlatesConfig(BaseModel):

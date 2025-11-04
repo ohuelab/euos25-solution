@@ -332,6 +332,7 @@ def filter_low_quality_features(
     min_variance: float = 1e-6,
     min_unique_ratio: float = 0.01,
     low_variance_threshold: float = 0.99,
+    feature_groups_to_filter: set[str] | None = None,
 ) -> pd.DataFrame:
     """Filter out low-quality feature columns.
 
@@ -349,11 +350,20 @@ def filter_low_quality_features(
         low_variance_threshold: Threshold for detecting mostly constant features.
             If a single value accounts for more than this ratio, the feature is removed.
             (default: 0.99)
+        feature_groups_to_filter: Set of feature group names to filter (e.g., {'mordred', 'rdkit2d'}).
+            If None, filters all features. If specified, only features from these groups are filtered.
+            Useful for excluding sparse features like ECFP or conj_proxy from quality filtering.
 
     Returns:
         DataFrame with low-quality features removed
     """
-    logger.info(f"Filtering low-quality features from {len(features.columns)} columns")
+    if feature_groups_to_filter is not None:
+        logger.info(
+            f"Filtering low-quality features from {len(features.columns)} columns "
+            f"(only groups: {feature_groups_to_filter})"
+        )
+    else:
+        logger.info(f"Filtering low-quality features from {len(features.columns)} columns")
 
     initial_count = len(features.columns)
     columns_to_keep = []
@@ -365,6 +375,24 @@ def filter_low_quality_features(
     }
 
     for col in features.columns:
+        # Check if this column should be filtered
+        should_filter = True
+        if feature_groups_to_filter is not None:
+            # Extract group name from column (format: "group__feature_name")
+            if "__" in col:
+                group_name = col.split("__")[0]
+                # Normalize group name if it has a known variant
+                normalized_group = GROUP_NAME_VARIANTS.get(group_name, group_name)
+                should_filter = normalized_group in feature_groups_to_filter or group_name in feature_groups_to_filter
+            else:
+                # No group prefix, skip filtering
+                should_filter = False
+
+        if not should_filter:
+            # Skip quality filtering for this column, keep it
+            columns_to_keep.append(col)
+            continue
+
         col_data = features[col]
 
         # Check NaN ratio
@@ -388,16 +416,26 @@ def filter_low_quality_features(
             continue
 
         # Check unique value ratio
+        # For sparse features (like ECFP), unique_ratio can be very small even for valid features
+        # So we only apply this check if variance is also low (double-check)
         unique_ratio = col_data_no_nan.nunique() / len(col_data_no_nan)
-        if unique_ratio < min_unique_ratio:
+        if unique_ratio < min_unique_ratio and variance < min_variance * 10:
+            # Only filter if both unique_ratio is low AND variance is very low
+            # This allows sparse but informative features (high variance despite low unique_ratio)
             stats['low_unique_ratio'].append(col)
             continue
 
         # Check if mostly constant (one value dominates)
+        # However, if variance is high enough, we keep it even if one value dominates
+        # (e.g., sparse binary features with high variance when non-zero)
         value_counts = col_data_no_nan.value_counts(normalize=True)
-        if len(value_counts) > 0 and value_counts.iloc[0] > low_variance_threshold:
-            stats['mostly_constant'].append(col)
-            continue
+        if len(value_counts) > 0:
+            max_value_ratio = value_counts.iloc[0]
+            # Only filter if mostly constant AND variance is low
+            # High variance features with dominant value can still be informative
+            if max_value_ratio > low_variance_threshold and variance < min_variance * 10:
+                stats['mostly_constant'].append(col)
+                continue
 
         columns_to_keep.append(col)
 

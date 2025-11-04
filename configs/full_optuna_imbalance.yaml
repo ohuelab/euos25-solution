@@ -1,43 +1,23 @@
-# Full feature set with Optuna tuning
-# Includes ECFP4, Mordred, Chemeleon, and custom features
-# Feature group selection is tuned by Optuna
-
 seed: 42
 folds: 5
 scaffold_min_size: 10
 
-# All feature types
 featurizers:
   - name: ecfp
     params:
       radius: 3
       n_bits: 2048
       use_counts: true
-      n_jobs: 48
   - name: rdkit2d
-    params:
-      n_jobs: 48
-  - name: mordred
-    params:
-      ignore_3d: true
-      n_jobs: 48
-  - name: chemeleon
-    params:
-      chemeleon_path: "data/pretrained/chemeleon_mp.pt"
-      aggregation: "mean"
-      device: null  # Auto-detect (cuda/mps/cpu)
+    params: {}
   - name: conj_proxy
     params:
       L_cut: 4
-  - name: chemberta
-    params:
-      pooling: mean
 
 model:
   name: lgbm
   params:
     n_estimators: 1000
-    # Parameters below will be tuned by Optuna
     learning_rate: 0.02
     max_depth: -1
     num_leaves: 255
@@ -48,8 +28,12 @@ model:
     reg_lambda: 0.1
 
 imbalance:
+  # This will be overridden by Optuna's use_pos_weight parameter
   use_pos_weight: true
   pos_weight_from_data: true
+  # Focal loss parameters (used when use_pos_weight=False)
+  focal_alpha: 0.25
+  focal_gamma: 2.0
 
 plates:
   normalize: false
@@ -68,8 +52,8 @@ log_level: INFO
 optuna:
   enable: true
   n_trials: 100
-  timeout: null  # No timeout (in seconds)
-  study_name: full_feat_tuning
+  timeout: null
+  study_name: full_imbalance_tuning
 
   # LGBM parameters to tune
   lgbm_params:
@@ -91,14 +75,30 @@ optuna:
       max: 1.0
       log: true
 
-  # Pos weight parameters
+  # Imbalance strategy to tune: pos_weight vs focal loss
+  imbalance_params:
+    use_pos_weight:
+      type: categorical
+      choices: [true, false]  # true=pos_weight, false=focal_loss
+
+  # pos_weight parameters (used when use_pos_weight=True)
   pos_weight_params:
     pos_weight_multiplier:
       type: float
       min: 0.5
       max: 2.0
 
-  # Feature group selection
-  # Optuna will tune which feature groups to include
-  feature_groups:
-    tune: true
+  # Focal loss parameters (used when use_pos_weight=False)
+  focal_params:
+    focal_alpha:
+      type: float
+      min: 0.1
+      max: 0.5
+    focal_gamma:
+      type: float
+      min: 1.0
+      max: 3.0
+    focal_scale:
+      type: float
+      min: 10.0
+      max: 200.0

@@ -45,7 +45,7 @@ metrics:
   - roc_auc
   - pr_auc
 
-early_stopping_rounds: 200
+early_stopping_rounds: 30
 early_stopping_metric: roc_auc
 
 log_level: INFO

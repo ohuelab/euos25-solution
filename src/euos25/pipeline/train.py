@@ -59,6 +59,10 @@ def create_model(config: Config, checkpoint_dir: Optional[str] = None) -> ClfMod
     # Add early stopping parameters
     model_params["early_stopping_rounds"] = config.early_stopping_rounds
 
+    # Add objective_type if specified in config
+    if config.model.objective_type is not None:
+        model_params["objective_type"] = config.model.objective_type
+
     if model_name == "lgbm":
         return LGBMClassifier(**model_params)
     elif model_name == "catboost":
@@ -107,6 +111,8 @@ def train_fold(
     fold_idx: int,
     output_dir: Optional[Path] = None,
     task_name: Optional[str] = None,
+    binary_labels_train: Optional[np.ndarray] = None,
+    binary_labels_valid: Optional[np.ndarray] = None,
 ) -> tuple[ClfModel, Dict[str, float]]:
     """Train model on single fold.
 
@@ -222,6 +228,11 @@ def train_fold(
     # Create model
     model = create_model(config, checkpoint_dir=checkpoint_dir)
 
+    # Set binary_labels for regression/ranking if provided
+    if binary_labels_train is not None and config.model.name == "lgbm":
+        if hasattr(model, '_binary_labels'):
+            model._binary_labels = binary_labels_train
+
     # Train model - handle different model signatures
     if config.model.name == "chemprop":
         # ChemProp uses X_val and y_val instead of eval_set
@@ -231,11 +242,15 @@ def train_fold(
         model.fit(X_train, y_train, eval_set=None)
     else:
         # LGBM and CatBoost use eval_set
-        model.fit(
-            X_train,
-            y_train,
-            eval_set=(X_valid, y_valid),
-        )
+        # Pass binary_labels_valid for regression/ranking
+        fit_kwargs = {
+            "X": X_train,
+            "y": y_train,
+            "eval_set": (X_valid, y_valid),
+        }
+        if binary_labels_valid is not None and config.model.name == "lgbm":
+            fit_kwargs["binary_labels_valid"] = binary_labels_valid
+        model.fit(**fit_kwargs)
 
     # Predict on validation
     y_pred = model.predict_proba(X_valid)
@@ -249,7 +264,9 @@ def train_fold(
         y_pred_proba = y_pred
 
     # Calculate metrics
-    metrics = calc_metrics(y_valid, y_pred_proba, metrics=config.metrics)
+    # Use binary_labels_valid for regression/ranking (ROC-AUC calculation)
+    y_valid_for_metrics = binary_labels_valid if binary_labels_valid is not None else y_valid
+    metrics = calc_metrics(y_valid_for_metrics, y_pred_proba, metrics=config.metrics)
 
     # Log metrics
     for metric_name, score in metrics.items():
@@ -301,12 +318,15 @@ def train_cv(
             )
 
     # Filter low-quality features (high NaN, low variance, mostly constant)
+    # Only apply to mordred and rdkit2d features, as sparse features like ECFP and conj_proxy
+    # should not be filtered based on quality metrics
     features = filter_low_quality_features(
         features,
         max_nan_ratio=0.99,  # 99%以上NaNの特徴量を除外
         min_variance=1e-6,
         min_unique_ratio=0.01,  # ユニーク値が1%未満の特徴量を除外
         low_variance_threshold=0.99,  # 99%以上が同じ値の特徴量を除外
+        feature_groups_to_filter={'mordred', 'rdkit2d'},  # 品質フィルタリングを適用する特徴量グループ
     )
 
     # Use task_name override if provided, otherwise use config.task
@@ -340,6 +360,13 @@ def train_cv(
         X_valid = features.loc[valid_ids]
         y_valid = labels.loc[valid_ids].values
 
+        # Get binary labels if available (for regression/ranking)
+        binary_labels_train = None
+        binary_labels_valid = None
+        if hasattr(config, '_binary_labels') and config._binary_labels is not None:
+            binary_labels_train = config._binary_labels.loc[train_ids].values
+            binary_labels_valid = config._binary_labels.loc[valid_ids].values
+
         # Train fold
         model, metrics = train_fold(
             X_train,
@@ -350,6 +377,8 @@ def train_cv(
             fold_idx,
             output_dir=output_path,
             task_name=actual_task_name,
+            binary_labels_train=binary_labels_train,
+            binary_labels_valid=binary_labels_valid,
         )
 
         fold_metrics.append(metrics)

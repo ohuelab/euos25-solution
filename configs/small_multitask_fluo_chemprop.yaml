@@ -1,12 +1,14 @@
-# Small ChemProp configuration for quick testing
-# Uses standard MPNN without foundation model
+# Multi-task ChemProp configuration for Fluorescence (2 tasks)
+# Tasks: fluorescence340_450, fluorescence480
 
 seed: 42
 folds: 5
 scaffold_min_size: 10
 
-# Task configuration
-task: "transmittance340"  # transmittance340, transmittance450, fluo340_450, fluo480
+# Multi-task configuration
+tasks:
+  - "fluorescence340_450"
+  - "fluorescence480"
 metrics:
   - "roc_auc"
   - "pr_auc"
@@ -15,34 +17,34 @@ metrics:
 model:
   name: "chemprop"
   params:
-    max_epochs: 10
-    batch_size: 32
+    max_epochs: 1
+    batch_size: 8192
     learning_rate: 0.001
     hidden_size: 300
     depth: 3
-    dropout: 0.0
+    dropout: 0.1
     aggregation: "mean"
     batch_norm: true
     ffn_num_layers: 2
     use_foundation: false
-    checkpoint_dir: "outputs/small_chemprop/checkpoints"
+    checkpoint_dir: "outputs/multitask_fluo_chemprop/checkpoints"
 
-# No featurizers needed for ChemProp (uses graph directly)
+# No featurizers needed for ChemProp
 featurizers: []
 
-# Imbalance handling (if needed)
+# Imbalance handling
 imbalance:
   use_pos_weight: false
   pos_weight_from_data: false
   use_sampling: false
   use_focal_loss: false
 
-# Optuna (disabled for small test)
+# Optuna (can be enabled for hyperparameter tuning)
 optuna:
   enable: false
 
 # Early stopping
-early_stopping_rounds: 50
+early_stopping_rounds: 1
 early_stopping_metric: "roc_auc"
 
 # Logging

@@ -399,12 +399,15 @@ def objective(
         return 0.0
 
     # Filter low-quality features (high NaN, low variance, mostly constant)
+    # Only apply to mordred and rdkit2d features, as sparse features like ECFP and conj_proxy
+    # should not be filtered based on quality metrics
     filtered_features = filter_low_quality_features(
         filtered_features,
         max_nan_ratio=0.99,  # 99%以上NaNの特徴量を除外
         min_variance=1e-6,
         min_unique_ratio=0.01,  # ユニーク値が1%未満の特徴量を除外
         low_variance_threshold=0.99,  # 99%以上が同じ値の特徴量を除外
+        feature_groups_to_filter={'mordred', 'rdkit2d'},  # 品質フィルタリングを適用する特徴量グループ
     )
 
     # Check again after low-quality filtering

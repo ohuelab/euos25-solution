@@ -8,10 +8,107 @@ from typing import Any, Callable, Dict, Optional, Tuple
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
+from sklearn.metrics import roc_auc_score
 
 from euos25.models.base import BaseClfModel
 
 logger = logging.getLogger(__name__)
+
+def regression_objective():
+    """Create regression (MSE) objective function for LightGBM."""
+    def fobj(preds: np.ndarray, train_data: lgb.Dataset):
+        y = train_data.get_label()
+        grad = preds - y
+        hess = np.ones_like(preds, dtype=np.float64)
+        return grad.astype(np.float64), hess.astype(np.float64)
+    return fobj
+
+
+def listmle_objective():
+    """Create ListMLE objective function for LightGBM.
+    
+    Listwise Maximum Likelihood Estimation for ranking learning.
+    """
+    eps = 1e-12
+    def fobj(preds: np.ndarray, train_data: lgb.Dataset):
+        y = train_data.get_label()
+        group = train_data.get_group()
+        grad = np.zeros_like(preds, dtype=np.float64)
+        hess = np.zeros_like(preds, dtype=np.float64)
+
+        idx = 0
+        for g in group:
+            sl = slice(idx, idx + g)
+            s = preds[sl]
+            yq = y[sl]
+
+            # 正解順位（ラベル降順）
+            pi = np.argsort(-yq, kind="mergesort")
+            s_pi = s[pi]
+
+            # 数値安定化
+            s_shift = s_pi - np.max(s_pi)
+            exp_s = np.exp(s_shift)
+
+            # Z_i = sum_{j>=i} exp(s_{pi_j})
+            Z = np.cumsum(exp_s[::-1])[::-1] + eps
+
+            # 1/Z の前方累積: S1_k = sum_{i<=k} 1/Z_i
+            invZ = 1.0 / Z
+            S1 = np.cumsum(invZ)
+
+            # 1/Z^2 の前方累積: S2_k = sum_{i<=k} 1/Z_i^2
+            invZ2 = invZ * invZ
+            S2 = np.cumsum(invZ2)
+
+            # 勾配: g_k = -1 + exp_s[k] * S1_k
+            g_pi = -1.0 + exp_s * S1
+
+            # 対角ヘッセ近似:
+            # h_k = sum_{i<=k} p_{i,k}(1 - p_{i,k})
+            #     = exp_s[k]*S1_k - (exp_s[k]^2)*S2_k
+            h_pi = exp_s * S1 - (exp_s * exp_s) * S2
+            h_pi = h_pi + eps  # safety
+
+            # 元の順序へ戻す
+            inv = np.empty_like(pi)
+            inv[pi] = np.arange(g)
+            grad[sl] = g_pi[inv]
+            hess[sl] = h_pi[inv]
+
+            idx += g
+
+        return grad, hess
+    return fobj
+
+
+def roc_auc_eval(y_true: np.ndarray):
+    """Create ROC-AUC evaluation function for LightGBM.
+    
+    Args:
+        y_true: True binary labels (0 or 1) for ROC-AUC calculation
+        
+    Returns:
+        Evaluation function that can be used with LightGBM
+    """
+    def feval(preds: np.ndarray, train_data: lgb.Dataset):
+        # For regression/ranking, predictions might be raw values
+        # Apply sigmoid to get probabilities
+        if len(preds.shape) == 0 or preds.ndim == 1:
+            # Single dimension predictions
+            probs = 1.0 / (1.0 + np.exp(-preds))
+        else:
+            # Multi-dimensional predictions
+            probs = 1.0 / (1.0 + np.exp(-preds[:, 1]))
+        
+        try:
+            auc = roc_auc_score(y_true, probs)
+            return 'roc_auc', auc, True  # True means higher is better
+        except ValueError:
+            # Handle case where only one class is present
+            return 'roc_auc', 0.0, True
+    return feval
+
 
 def focal_loss_objective(alpha: float, gamma: float, scale: float = 100.0):
     """Create focal loss objective function for LightGBM.
@@ -61,6 +158,8 @@ class LGBMClassifier(BaseClfModel):
         focal_gamma: float = 2.0,
         early_stopping_rounds: int = 50,
         verbose: int = -1,
+        objective_type: Optional[str] = None,
+        binary_labels: Optional[np.ndarray] = None,
         **kwargs: Any,
     ):
         """Initialize LightGBM classifier.
@@ -83,6 +182,8 @@ class LGBMClassifier(BaseClfModel):
             focal_gamma: Gamma parameter for focal loss (focusing parameter)
             early_stopping_rounds: Early stopping patience
             verbose: Verbosity level
+            objective_type: Objective type ("regression", "listmle", or None for binary)
+            binary_labels: Binary labels for ROC-AUC calculation (used with regression/ranking)
             **kwargs: Additional LightGBM parameters
         """
         super().__init__(
@@ -110,6 +211,8 @@ class LGBMClassifier(BaseClfModel):
         self.feature_names: Optional[list] = None
         self.best_iteration: int = 0
         self._used_focal_loss: bool = False
+        self._objective_type: Optional[str] = objective_type
+        self._binary_labels: Optional[np.ndarray] = binary_labels
 
     def _compute_pos_weight(self, y: np.ndarray) -> float:
         """Compute pos_weight as (N-P)/P.
@@ -147,6 +250,7 @@ class LGBMClassifier(BaseClfModel):
         y: np.ndarray,
         sample_weight: Optional[np.ndarray] = None,
         eval_set: Optional[tuple] = None,
+        binary_labels_valid: Optional[np.ndarray] = None,
     ) -> "LGBMClassifier":
         """Fit LightGBM model.
 
@@ -173,9 +277,23 @@ class LGBMClassifier(BaseClfModel):
         # Store feature names
         self.feature_names = numeric_cols
 
-        # Check if using focal loss
-        use_focal_loss = self.params.get("use_focal_loss", False)
-
+        # Check objective type
+        objective_type = self._objective_type or self.params.get("objective_type")
+        use_focal_loss = self.params.get("use_focal_loss", False) and objective_type is None
+        
+        # Store binary labels for ROC-AUC calculation if using regression/ranking
+        binary_labels_train = None
+        binary_labels_val = None
+        if objective_type in ["regression", "listmle"]:
+            if self._binary_labels is not None:
+                binary_labels_train = self._binary_labels
+                if eval_set is not None:
+                    # For validation, we need to pass binary labels separately
+                    # This will be handled in the eval_set creation
+                    pass
+            else:
+                logger.warning("objective_type is set but binary_labels not provided. ROC-AUC calculation may not work correctly.")
+        
         # Prepare LightGBM parameters
         lgb_params = {
             "metric": "auc",
@@ -194,7 +312,20 @@ class LGBMClassifier(BaseClfModel):
         }
 
         # Set objective function
-        if use_focal_loss:
+        fobj = None
+        if objective_type == "regression":
+            logger.info("Using regression (MSE) objective")
+            fobj = regression_objective()
+            lgb_params["objective"] = fobj
+            # For regression, we'll use custom eval for ROC-AUC if available
+            # Don't remove metric yet - we'll handle it after checking if feval is available
+        elif objective_type == "listmle":
+            logger.info("Using ListMLE objective")
+            fobj = listmle_objective()
+            lgb_params["objective"] = fobj
+            # For ranking, we'll use custom eval for ROC-AUC if available
+            # Don't remove metric yet - we'll handle it after checking if feval is available
+        elif use_focal_loss:
             # Compute focal_alpha if not provided
             focal_alpha = self.params.get("focal_alpha")
             if focal_alpha is None:
@@ -228,19 +359,31 @@ class LGBMClassifier(BaseClfModel):
         excluded_keys = [
             "name", "n_estimators", "pos_weight", "pos_weight_multiplier",
             "early_stopping_rounds", "use_focal_loss", "focal_alpha", "focal_gamma",
-            "focal_scale"
+            "focal_scale", "objective_type", "binary_labels"
         ]
         for key, value in self.params.items():
             if key not in lgb_params and key not in excluded_keys:
                 lgb_params[key] = value
 
         # Create dataset
-        train_data = lgb.Dataset(
-            X,
-            label=y,
-            weight=sample_weight,
-            feature_name=self.feature_names,
-        )
+        # For ListMLE, we need to set group (all samples in one group)
+        if objective_type == "listmle":
+            # All samples in one group for listwise ranking
+            group = [len(y)]
+            train_data = lgb.Dataset(
+                X,
+                label=y,
+                weight=sample_weight,
+                feature_name=self.feature_names,
+                group=group,
+            )
+        else:
+            train_data = lgb.Dataset(
+                X,
+                label=y,
+                weight=sample_weight,
+                feature_name=self.feature_names,
+            )
 
         # Prepare validation set
         valid_sets = [train_data]
@@ -252,19 +395,52 @@ class LGBMClassifier(BaseClfModel):
             
             # Ensure validation set uses same numeric columns as training
             X_val = X_val[numeric_cols]
-            valid_data = lgb.Dataset(
-                X_val,
-                label=y_val,
-                reference=train_data,
-                feature_name=self.feature_names,
-            )
+            if objective_type == "listmle":
+                group_val = [len(y_val)]
+                valid_data = lgb.Dataset(
+                    X_val,
+                    label=y_val,
+                    reference=train_data,
+                    feature_name=self.feature_names,
+                    group=group_val,
+                )
+            else:
+                valid_data = lgb.Dataset(
+                    X_val,
+                    label=y_val,
+                    reference=train_data,
+                    feature_name=self.feature_names,
+                )
             valid_sets.append(valid_data)
             valid_names.append("valid")
 
         # Train model
         logger.info(f"Training LightGBM with {self.params['n_estimators']} rounds")
         callbacks = []
+        feval_list = []
+        
+        # Add custom eval function for regression/ranking if binary labels are available
+        if objective_type in ["regression", "listmle"] and eval_set is not None:
+            X_val, y_val = eval_set
+            # Use binary_labels_valid if provided, otherwise try to use stored binary_labels
+            if binary_labels_valid is not None:
+                # Create custom ROC-AUC evaluation function
+                feval = roc_auc_eval(binary_labels_valid)
+                feval_list.append(feval)
+                # Remove metric since we're using custom feval
+                lgb_params.pop("metric", None)
+                logger.info("Using custom ROC-AUC evaluation function for regression/ranking")
+            else:
+                # If no binary labels for validation, we can't use ROC-AUC for early stopping
+                # Keep default metric or use L2 loss
+                if "metric" not in lgb_params:
+                    lgb_params["metric"] = "l2"  # Use L2 loss for regression/ranking
+                logger.warning("Binary labels for validation set not provided. Using L2 metric for early stopping instead of ROC-AUC.")
+        
         if eval_set is not None:
+            # Early stopping requires either metric or feval
+            if not feval_list and "metric" not in lgb_params:
+                raise ValueError("For early stopping with regression/ranking, either binary_labels_valid must be provided for ROC-AUC, or a metric must be set in lgb_params")
             callbacks.append(lgb.early_stopping(self.params["early_stopping_rounds"]))
 
         train_kwargs = {
@@ -275,6 +451,8 @@ class LGBMClassifier(BaseClfModel):
             "valid_names": valid_names,
             "callbacks": callbacks,
         }
+        if feval_list:
+            train_kwargs["feval"] = feval_list[0] if len(feval_list) == 1 else feval_list
         if use_focal_loss:
             # debug
             grad, hess = fobj(np.zeros_like(y), train_data)
@@ -314,9 +492,9 @@ class LGBMClassifier(BaseClfModel):
 
         preds = self.model.predict(X, num_iteration=self.best_iteration)
 
-        # If using custom objective (focal loss), predictions are raw logits
+        # If using custom objective (focal loss, regression, listmle), predictions are raw values
         # Need to apply sigmoid transformation to get probabilities
-        if self._used_focal_loss:
+        if self._used_focal_loss or self._objective_type in ["regression", "listmle"]:
             # Apply sigmoid: 1 / (1 + exp(-logit))
             preds = 1.0 / (1.0 + np.exp(-preds))
 

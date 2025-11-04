@@ -8,27 +8,30 @@ scaffold_min_size: 10
 
 # All feature types
 featurizers:
-  # - name: ecfp
-  #   params:
-  #     radius: 3
-  #     n_bits: 2048
-  #     use_counts: true
-  # - name: rdkit2d
-  #   params: {}
+  - name: ecfp
+    params:
+      radius: 3
+      n_bits: 2048
+      use_counts: true
+      n_jobs: 48
+  - name: rdkit2d
+    params:
+      n_jobs: 48
   - name: mordred
     params:
       ignore_3d: true
-  # - name: chemeleon
-  #   params:
-  #     chemeleon_path: "data/pretrained/chemeleon_mp.pt"
-  #     aggregation: "mean"
-  #     device: null  # Auto-detect (cuda/mps/cpu)
-  # - name: conj_proxy
-  #   params:
-  #     L_cut: 4
-  # - name: chemberta
-  #   params:
-  #     pooling: mean
+      n_jobs: 48
+  - name: chemeleon
+    params:
+      chemeleon_path: "data/pretrained/chemeleon_mp.pt"
+      aggregation: "mean"
+      device: null  # Auto-detect (cuda/mps/cpu)
+  - name: conj_proxy
+    params:
+      L_cut: 4
+  - name: chemberta
+    params:
+      pooling: mean
 
 model:
   name: lgbm
@@ -58,7 +61,7 @@ metrics:
   - roc_auc
   - pr_auc
 
-early_stopping_rounds: 200
+early_stopping_rounds: 30
 early_stopping_metric: roc_auc
 
 log_level: INFO
@@ -66,7 +69,7 @@ log_level: INFO
 # Optuna hyperparameter tuning configuration
 optuna:
   enable: true
-  n_trials: 200
+  n_trials: 100
   timeout: null  # No timeout (in seconds)
   study_name: full_feat_focal_tuning
 

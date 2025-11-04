@@ -1,0 +1,62 @@
+# Full Chemeleon+LGBM with Transmittance (quantitative) ListMLE ranking configuration
+# Uses Chemeleon embeddings as features for LightGBM with ListMLE objective
+
+seed: 42
+folds: 5
+scaffold_min_size: 10
+
+# Task configuration
+task: "transmittance340"
+metrics:
+  - "roc_auc"
+  - "pr_auc"
+
+# Featurizers - Chemeleon embeddings
+featurizers:
+  - name: ecfp
+    params:
+      radius: 3
+      n_bits: 2048
+      use_counts: true
+  - name: rdkit2d
+    params: {}
+  - name: conj_proxy
+    params:
+      L_cut: 4
+
+# Model configuration - LightGBM with ListMLE objective
+model:
+  name: "lgbm"
+  objective_type: "listmle"
+  params:
+    n_estimators: 1000
+    learning_rate: 0.02
+    max_depth: -1
+    num_leaves: 255
+    subsample: 0.8
+    colsample_bytree: 0.8
+    min_child_samples: 10
+    reg_alpha: 0.1
+    reg_lambda: 0.1
+
+# Imbalance handling - Use quantitative values
+imbalance:
+  use_pos_weight: false
+  use_focal_loss: false
+  use_quantitative: true
+  quantitative_normalize: true
+
+# Early stopping
+early_stopping_rounds: 200
+early_stopping_metric: "roc_auc"
+
+# Logging
+log_level: "INFO"
+
+# Optuna hyperparameter tuning configuration (disabled)
+optuna:
+  enable: false
+
+# Note: Chemeleon foundation model weights (chemeleon_mp.pt) must be downloaded separately
+# See: https://chemprop.readthedocs.io/en/latest/chemeleon_foundation_finetuning.html
+
