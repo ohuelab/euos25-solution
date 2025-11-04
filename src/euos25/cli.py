@@ -141,7 +141,7 @@ def train(features, splits, config, outdir, label_col, data, task):
 
     if use_quantitative and label_col == "Transmittance":
         # Load quantitative column
-        quantitative_col = "Transmittance (quantitative)"
+        quantitative_col = "Transmittance.1"
         if quantitative_col not in df.columns:
             raise ValueError(f"Quantitative column {quantitative_col} not found")
 
