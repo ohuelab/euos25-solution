@@ -6,7 +6,7 @@ folds: 5
 scaffold_min_size: 10
 
 # Task configuration
-task: "transmittance340"
+task: y_fluo_any
 metrics:
   - "roc_auc"
   - "pr_auc"
@@ -47,7 +47,7 @@ imbalance:
   quantitative_normalize: true
 
 # Early stopping
-early_stopping_rounds: 200
+early_stopping_rounds: 50
 early_stopping_metric: "roc_auc"
 
 # Logging

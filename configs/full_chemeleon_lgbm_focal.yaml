@@ -6,29 +6,12 @@ folds: 5
 scaffold_min_size: 10
 
 # Featurizers - Chemeleon embeddings
-
 featurizers:
-  - name: ecfp
-    params:
-      radius: 3
-      n_bits: 2048
-      use_counts: true
-  - name: rdkit2d
-    params: {}
-  - name: mordred
-    params:
-      ignore_3d: true
-  - name: chemeleon
+  - name: "chemeleon"
     params:
       chemeleon_path: "data/pretrained/chemeleon_mp.pt"
       aggregation: "mean"
       device: null  # Auto-detect (cuda/mps/cpu)
-  - name: conj_proxy
-    params:
-      L_cut: 4
-  - name: chemberta
-    params:
-      pooling: mean
 
 # Model configuration - LightGBM
 model:
@@ -65,7 +48,7 @@ metrics:
   - roc_auc
   - pr_auc
 
-early_stopping_rounds: 200
+early_stopping_rounds: 50
 early_stopping_metric: roc_auc
 
 log_level: INFO
@@ -111,6 +94,8 @@ optuna:
       type: float
       min: 10.0
       max: 200.0
+  feature_groups:
+    tune: false
 
 # Note: Chemeleon foundation model weights (chemeleon_mp.pt) must be downloaded separately
 # See: https://chemprop.readthedocs.io/en/latest/chemeleon_foundation_finetuning.html

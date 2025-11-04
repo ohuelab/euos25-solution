@@ -1,23 +1,49 @@
+# Full Chemeleon+LGBM with Transmittance (quantitative) regression configuration (with Optuna)
+# Uses Chemeleon embeddings as features for LightGBM with regression objective
+
 seed: 42
 folds: 5
 scaffold_min_size: 10
 
+# Task configuration
+task: y_fluo_any
+metrics:
+  - "roc_auc"
+  - "pr_auc"
+
+# Featurizers - Chemeleon embeddings
 featurizers:
   - name: ecfp
     params:
       radius: 3
       n_bits: 2048
       use_counts: true
+      n_jobs: 48
   - name: rdkit2d
-    params: {}
+    params:
+      n_jobs: 48
+  - name: mordred
+    params:
+      ignore_3d: true
+      n_jobs: 48
+  - name: chemeleon
+    params:
+      chemeleon_path: "data/pretrained/chemeleon_mp.pt"
+      aggregation: "mean"
+      device: null  # Auto-detect (cuda/mps/cpu)
   - name: conj_proxy
     params:
       L_cut: 4
+  - name: chemberta
+    params:
+      pooling: mean
 
+
+# Model configuration - LightGBM with regression objective
 model:
-  name: lgbm
+  name: "lgbm"
+  objective_type: "regression"
   params:
-    n_jobs: -1
     n_estimators: 1000
     # Parameters below will be tuned by Optuna
     learning_rate: 0.02
@@ -29,36 +55,26 @@ model:
     reg_alpha: 0.1
     reg_lambda: 0.1
 
+# Imbalance handling - Use quantitative values
 imbalance:
   use_pos_weight: false
-  use_focal_loss: true  # Set to false and use_pos_weight: true to use pos_weight instead
-  # Focal loss parameters will be tuned by Optuna
-  focal_alpha: 0.25
-  focal_gamma: 2.0
-  # Alternative: use pos_weight instead
-  # use_pos_weight: true
-  # pos_weight_from_data: true
-  # use_focal_loss: false
+  use_focal_loss: false
+  use_quantitative: true
+  quantitative_normalize: true
 
-plates:
-  normalize: false
-
-task: y_fluo_any
-metrics:
-  - roc_auc
-  - pr_auc
-
+# Early stopping
 early_stopping_rounds: 50
-early_stopping_metric: roc_auc
+early_stopping_metric: "roc_auc"
 
-log_level: INFO
+# Logging
+log_level: "INFO"
 
 # Optuna hyperparameter tuning configuration
 optuna:
   enable: true
   n_trials: 100
   timeout: null  # No timeout (in seconds)
-  study_name: full_focal_tuning
+  study_name: lgbm_feat_reg_optuna
 
   # LGBM parameters to tune
   # Any parameter not listed here will use the fixed value from model.params
@@ -80,17 +96,5 @@ optuna:
       min: 0.001
       max: 1.0
       log: true
-  # Focal loss parameters to tune (when use_focal_loss=True)
-  focal_params:
-    focal_alpha:
-      type: float
-      min: 0.1
-      max: 0.5
-    focal_gamma:
-      type: float
-      min: 1.0
-      max: 3.0
-    focal_scale:
-      type: float
-      min: 10.0
-      max: 200.0
+  feature_groups:
+    tune: true

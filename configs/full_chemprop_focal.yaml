@@ -6,7 +6,7 @@ folds: 5
 scaffold_min_size: 10
 
 # Task configuration
-task: "transmittance340"
+task: y_fluo_any
 metrics:
   - "roc_auc"
   - "pr_auc"

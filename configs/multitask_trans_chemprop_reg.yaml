@@ -1,19 +1,23 @@
-# Full ChemProp configuration for production training
-# Uses standard MPNN without foundation model
+# Multi-task ChemProp configuration for Transmittance (2 tasks) - Regression
+# Tasks: transmittance340, transmittance450
+# Uses regression objective instead of binary classification
 
 seed: 42
 folds: 5
 scaffold_min_size: 10
 
-# Task configuration
-task: y_fluo_any
+# Multi-task configuration
+tasks:
+  - "transmittance340"
+  - "transmittance450"
 metrics:
   - "roc_auc"
   - "pr_auc"
 
-# Model configuration
+# Model configuration - ChemProp with regression objective
 model:
   name: "chemprop"
+  objective_type: "regression"
   params:
     max_epochs: 1000
     batch_size: 8192
@@ -25,17 +29,19 @@ model:
     batch_norm: true
     ffn_num_layers: 2
     use_foundation: false
-    checkpoint_dir: "outputs/full_chemprop/checkpoints"
+    checkpoint_dir: "outputs/multitask_trans_chemprop_reg/checkpoints"
 
 # No featurizers needed for ChemProp
 featurizers: []
 
-# Imbalance handling
+# Imbalance handling - Use quantitative values for regression
 imbalance:
   use_pos_weight: false
   pos_weight_from_data: false
   use_sampling: false
   use_focal_loss: false
+  use_quantitative: true
+  quantitative_normalize: true
 
 # Optuna (can be enabled for hyperparameter tuning)
 optuna:
@@ -47,3 +53,4 @@ early_stopping_metric: "roc_auc"
 
 # Logging
 log_level: "INFO"
+

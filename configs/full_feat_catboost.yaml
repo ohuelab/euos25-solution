@@ -1,5 +1,5 @@
-# Full Chemeleon+LGBM configuration
-# Uses Chemeleon embeddings as features for LightGBM
+# Full Chemeleon+CatBoost configuration
+# Uses Chemeleon embeddings as features for CatBoost
 
 seed: 42
 folds: 5
@@ -12,18 +12,20 @@ metrics:
   - "pr_auc"
 
 # Featurizers - Chemeleon embeddings
-
 featurizers:
   - name: ecfp
     params:
       radius: 3
       n_bits: 2048
       use_counts: true
+      n_jobs: 48
   - name: rdkit2d
-    params: {}
+    params:
+      n_jobs: 48
   - name: mordred
     params:
       ignore_3d: true
+      n_jobs: 48
   - name: chemeleon
     params:
       chemeleon_path: "data/pretrained/chemeleon_mp.pt"
@@ -36,20 +38,18 @@ featurizers:
     params:
       pooling: mean
 
-# Model configuration - LightGBM
+# Model configuration - CatBoost
 model:
-  name: "lgbm"
+  name: "catboost"
   params:
     n_estimators: 1000
     # Parameters below will be tuned by Optuna
-    learning_rate: 0.02
-    max_depth: -1
-    num_leaves: 255
+    learning_rate: 0.03
+    max_depth: 6
     subsample: 0.8
-    colsample_bytree: 0.8
-    min_child_samples: 10
-    reg_alpha: 0.1
-    reg_lambda: 0.1
+    colsample_bylevel: 0.8
+    min_data_in_leaf: 20
+    l2_leaf_reg: 3.0
 
 # Imbalance handling
 imbalance:
@@ -59,7 +59,7 @@ imbalance:
   use_focal_loss: false
 
 # Early stopping
-early_stopping_rounds: 30
+early_stopping_rounds: 50
 early_stopping_metric: "roc_auc"
 
 # Logging
@@ -70,33 +70,32 @@ optuna:
   enable: true
   n_trials: 100
   timeout: null  # No timeout (in seconds)
-  study_name: chemeleon_lgbm_tuning
+  study_name: chemeleon_catboost_tuning
 
-  # LGBM parameters to tune
+  # CatBoost parameters to tune
   # Any parameter not listed here will use the fixed value from model.params
-  lgbm_params:
+  catboost_params:
     learning_rate:
       type: float
       min: 0.01
       max: 0.08
-    num_leaves:
+    max_depth:
       type: int
-      min: 63
-      max: 511
-    min_child_samples:
+      min: 4
+      max: 10
+    min_data_in_leaf:
       type: int
       min: 5
       max: 50
-    reg_alpha:
+    l2_leaf_reg:
       type: float
-      min: 0.001
-      max: 1.0
+      min: 1.0
+      max: 10.0
       log: true
   pos_weight_params:
     pos_weight_multiplier:
       type: float
       min: 0.5
       max: 2.0
-
-# Note: Chemeleon foundation model weights (chemeleon_mp.pt) must be downloaded separately
-# See: https://chemprop.readthedocs.io/en/latest/chemeleon_foundation_finetuning.html
+  feature_groups:
+    tune: true

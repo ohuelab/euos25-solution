@@ -1,5 +1,6 @@
-# Full Chemeleon configuration for production training
-# Uses ChemProp with Chemeleon foundation model
+# Full ChemProp configuration for production training (Regression)
+# Uses standard MPNN without foundation model
+# Regression objective instead of binary classification
 
 seed: 42
 folds: 5
@@ -11,32 +12,34 @@ metrics:
   - "roc_auc"
   - "pr_auc"
 
-# Model configuration
+# Model configuration - ChemProp with regression objective
 model:
   name: "chemprop"
+  objective_type: "regression"
   params:
     max_epochs: 1000
     batch_size: 8192
-    learning_rate: 0.0001  # Lower LR for foundation model fine-tuning
+    learning_rate: 0.001
     hidden_size: 300
     depth: 3
     dropout: 0.1
     aggregation: "mean"
-    batch_norm: false  # Typically false with foundation models
+    batch_norm: true
     ffn_num_layers: 2
-    use_foundation: true
-    foundation_name: "chemeleon"
-    checkpoint_dir: "outputs/full_chemeleon/checkpoints"
+    use_foundation: false
+    checkpoint_dir: "outputs/full_chemprop_reg/checkpoints"
 
 # No featurizers needed for ChemProp
 featurizers: []
 
-# Imbalance handling
+# Imbalance handling - Use quantitative values for regression
 imbalance:
   use_pos_weight: false
   pos_weight_from_data: false
   use_sampling: false
   use_focal_loss: false
+  use_quantitative: true
+  quantitative_normalize: true
 
 # Optuna (can be enabled for hyperparameter tuning)
 optuna:
@@ -49,5 +52,3 @@ early_stopping_metric: "roc_auc"
 # Logging
 log_level: "INFO"
 
-# Note: Chemeleon foundation model weights (chemeleon_mp.pt) must be downloaded separately
-# See: https://chemprop.readthedocs.io/en/latest/chemeleon_foundation_finetuning.html

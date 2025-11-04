@@ -6,14 +6,14 @@ folds: 5
 scaffold_min_size: 10
 
 # Task configuration
-task: "transmittance340"
+task: y_fluo_any
 metrics:
   - "roc_auc"
   - "pr_auc"
 
 # Featurizers - Chemeleon embeddings
 featurizers:
-  - name: "chemeleon"
+  - name: chemeleon
     params:
       chemeleon_path: "data/pretrained/chemeleon_mp.pt"
       aggregation: "mean"
@@ -40,7 +40,7 @@ imbalance:
   use_focal_loss: false
 
 # Early stopping
-early_stopping_rounds: 200
+early_stopping_rounds: 50
 early_stopping_metric: "roc_auc"
 
 # Logging
