@@ -1,0 +1,56 @@
+# Full Uni-Mol-2 configuration with Focal Loss for imbalanced data
+# Uses Uni-Mol-2 pretrained model with Focal Loss for better handling of class imbalance
+
+seed: 42
+folds: 5
+scaffold_min_size: 10
+
+# Task configuration
+task: "transmittance340"
+metrics:
+  - "roc_auc"
+  - "pr_auc"
+
+# Model configuration
+model:
+  name: "unimol"
+  params:
+    max_epochs: 1000
+    batch_size: 32  # Smaller batch size due to 3D structure processing
+    learning_rate: 0.0001  # Lower LR for foundation model fine-tuning
+    hidden_size: 300
+    ffn_num_layers: 2
+    dropout: 0.1
+    pretrained_model: "unimol2"  # Options: "unimol2", "unimol2-large", "unimol3"
+    pretrained_model_path: null
+    freeze_backbone: false
+    freeze_layers: null
+    optimize_3d: true
+    use_focal_loss: true
+    focal_alpha: 0.25  # Weighting factor for positive class
+    focal_gamma: 2.0  # Focusing parameter
+    checkpoint_dir: "outputs/full_unimol_focal/checkpoints"
+
+# No featurizers needed for Uni-Mol-2
+featurizers: []
+
+# Imbalance handling
+imbalance:
+  use_pos_weight: false
+  pos_weight_from_data: false
+  use_sampling: false
+  use_focal_loss: true
+  focal_alpha: 0.25
+  focal_gamma: 2.0
+
+# Optuna (can be enabled for hyperparameter tuning)
+optuna:
+  enable: false
+
+# Early stopping
+early_stopping_rounds: 30
+early_stopping_metric: "roc_auc"
+
+# Logging
+log_level: "INFO"
+

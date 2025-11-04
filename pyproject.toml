@@ -28,6 +28,8 @@ dependencies = [
     "mordred>=1.2.0",
     "transformers>=4.30.0",
     "catboost>=1.2.8",
+    "huggingface-hub>=0.20.0", # For Uni-Mol-2 model downloads
+    "unimol",
 ]
 
 [project.optional-dependencies]
@@ -69,3 +71,6 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
+
+[tool.uv.sources]
+unimol = { path = "Uni-Mol/unimol" }

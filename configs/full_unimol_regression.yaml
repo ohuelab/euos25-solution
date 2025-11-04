@@ -1,0 +1,59 @@
+# Full Uni-Mol-2 configuration for regression task
+# Uses Uni-Mol-2 pretrained model for quantitative property prediction
+
+seed: 42
+folds: 5
+scaffold_min_size: 10
+
+# Task configuration
+task: "transmittance340"
+metrics:
+  - "roc_auc"
+  - "pr_auc"
+
+# Model configuration
+model:
+  name: "unimol"
+  objective_type: "regression"  # Use regression objective
+  params:
+    max_epochs: 1000
+    batch_size: 32  # Smaller batch size due to 3D structure processing
+    learning_rate: 0.0001  # Lower LR for foundation model fine-tuning
+    hidden_size: 300
+    ffn_num_layers: 2
+    dropout: 0.1
+    pretrained_model: "unimol2"  # Options: "unimol2", "unimol2-large", "unimol3"
+    pretrained_model_path: null
+    freeze_backbone: false
+    freeze_layers: null
+    optimize_3d: true
+    regression_loss_type: "mse"  # Options: "mse", "mae", "huber", "smooth_l1"
+    regression_loss_params:  # Parameters for regression loss
+      # For Huber loss: delta: 1.0
+      # For other losses: empty dict is fine
+      {}
+    checkpoint_dir: "outputs/full_unimol_regression/checkpoints"
+
+# No featurizers needed for Uni-Mol-2
+featurizers: []
+
+# Imbalance handling
+imbalance:
+  use_pos_weight: false
+  pos_weight_from_data: false
+  use_sampling: false
+  use_focal_loss: false
+  use_quantitative: true  # Use quantitative values for regression
+  quantitative_normalize: true  # Normalize quantitative values to 0-1
+
+# Optuna (can be enabled for hyperparameter tuning)
+optuna:
+  enable: false
+
+# Early stopping
+early_stopping_rounds: 30
+early_stopping_metric: "roc_auc"
+
+# Logging
+log_level: "INFO"
+

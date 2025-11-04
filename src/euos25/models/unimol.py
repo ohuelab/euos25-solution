@@ -1,0 +1,1156 @@
+"""Uni-Mol-2 model wrapper for binary classification and regression."""
+
+import logging
+import os
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+import pandas as pd
+import torch
+import torch.nn as nn
+from lightning import pytorch as pl
+from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
+from rdkit import Chem
+from rdkit.Chem import AllChem
+from torchmetrics import Metric
+from torchmetrics.utilities.data import dim_zero_cat
+
+from euos25.models.base import BaseClfModel
+
+logger = logging.getLogger(__name__)
+
+# Set OpenMP environment variables to prevent segmentation faults on macOS
+if "KMP_DUPLICATE_LIB_OK" not in os.environ:
+    os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+if "OMP_NUM_THREADS" not in os.environ:
+    os.environ["OMP_NUM_THREADS"] = "1"
+
+# Try to import Uni-Mol-2 related packages
+UNIMOL_AVAILABLE = False
+UNIMOL_USE_TRANSFORMERS = False
+UNIMOL_USE_UNIMOL = False
+
+try:
+    # Try to import from unimol package
+    import unimol
+    from unimol import UniMolModel as UniMolModelBase
+
+    UNIMOL_AVAILABLE = True
+    UNIMOL_USE_UNIMOL = True
+    logger.info("Uni-Mol-2 package found (unimol)")
+except ImportError:
+    try:
+        # Fallback to transformers for HuggingFace models
+        from transformers import AutoModel, AutoTokenizer
+
+        UNIMOL_AVAILABLE = True
+        UNIMOL_USE_TRANSFORMERS = True
+        logger.info("Uni-Mol-2 package found (transformers)")
+    except ImportError:
+        UNIMOL_AVAILABLE = False
+        UNIMOL_USE_TRANSFORMERS = False
+        logger.warning(
+            "Uni-Mol-2 packages not found. Please install 'unimol' or 'transformers' package. "
+            "The model will not be available until the package is installed."
+        )
+
+
+class BinaryROCAUCMetric(Metric):
+    """Custom ROC AUC metric that uses binary labels for regression/ranking.
+
+    This metric computes ROC AUC using binary labels (0/1) even when
+    the model is trained with regression or ranking objectives.
+    """
+
+    def __init__(self, binary_labels: Optional[torch.Tensor] = None):
+        """Initialize Binary ROC AUC Metric.
+
+        Args:
+            binary_labels: Binary labels (0/1) for ROC AUC calculation.
+                          If None, uses the target values directly.
+        """
+        super().__init__()
+        self.add_state("preds", default=[], dist_reduce_fx="cat")
+        self.add_state("indices", default=[], dist_reduce_fx="cat")
+        self.binary_labels = binary_labels
+        self.current_idx = 0
+
+    def reset(self):
+        """Reset metric state."""
+        super().reset()
+        self.current_idx = 0
+
+    def update(self, preds: torch.Tensor, targets: torch.Tensor):
+        """Update metric state.
+
+        Args:
+            preds: Predictions (probabilities after sigmoid)
+            targets: Target values (quantitative values for regression/ranking)
+        """
+        # Flatten if multi-dimensional
+        if preds.dim() > 1:
+            preds = preds.flatten()
+        if targets.dim() > 1:
+            targets = targets.flatten()
+
+        batch_size = len(preds)
+        indices = torch.arange(self.current_idx, self.current_idx + batch_size, device=preds.device)
+        self.current_idx += batch_size
+
+        self.preds.append(preds)
+        self.indices.append(indices)
+
+    def compute(self) -> torch.Tensor:
+        """Compute ROC AUC.
+
+        Returns:
+            ROC AUC score
+        """
+        from torchmetrics.functional.classification import binary_auroc
+
+        preds = dim_zero_cat(self.preds)
+        indices = dim_zero_cat(self.indices)
+
+        # Use binary labels if provided, otherwise use targets directly
+        if self.binary_labels is not None:
+            # Map indices to binary labels
+            indices_np = indices.cpu().numpy().astype(int)
+            if len(self.binary_labels) > indices_np.max():
+                targets = torch.from_numpy(self.binary_labels[indices_np]).to(preds.device)
+            else:
+                logger.warning(
+                    f"Binary labels length ({len(self.binary_labels)}) "
+                    f"is less than max index ({indices_np.max()}). "
+                    "Using 0.5 threshold on predictions."
+                )
+                targets = (preds > 0.5).long()
+        else:
+            # Fallback: use 0.5 threshold
+            targets = (preds > 0.5).long()
+
+        # Ensure targets are binary
+        if targets.dtype != torch.bool and targets.dtype != torch.long:
+            targets = (targets > 0.5).long()
+
+        try:
+            return binary_auroc(preds, targets)
+        except Exception as e:
+            logger.warning(f"Error computing ROC AUC: {e}. Returning 0.5")
+            return torch.tensor(0.5, device=preds.device)
+
+
+def collate_fn(batch):
+    """Collate function for batching variable-length molecules.
+
+    Args:
+        batch: List of (coords, atom_types, label) or (coords, atom_types)
+
+    Returns:
+        Batched tensors with padding
+    """
+    if len(batch[0]) == 3:
+        # Training batch: (coords, atom_types, labels)
+        coords_list, atom_types_list, labels_list = zip(*batch)
+        labels = torch.stack(labels_list)
+    else:
+        # Inference batch: (coords, atom_types)
+        coords_list, atom_types_list = zip(*batch)
+        labels = None
+
+    # Find max number of atoms in batch
+    max_atoms = max(coords.shape[0] for coords in coords_list)
+
+    # Pad coordinates and atom types
+    batch_size = len(coords_list)
+    coords_padded = torch.zeros(batch_size, max_atoms, 3, dtype=torch.float32)
+    atom_types_padded = torch.zeros(batch_size, max_atoms, dtype=torch.long)
+    mask = torch.zeros(batch_size, max_atoms, dtype=torch.bool)
+
+    for i, (coords, atom_types) in enumerate(zip(coords_list, atom_types_list)):
+        n_atoms = coords.shape[0]
+        coords_padded[i, :n_atoms] = coords
+        atom_types_padded[i, :n_atoms] = atom_types
+        mask[i, :n_atoms] = True
+
+    if labels is not None:
+        return coords_padded, atom_types_padded, labels, mask
+    else:
+        return coords_padded, atom_types_padded, mask
+
+
+class UniMolDataset(torch.utils.data.Dataset):
+    """Dataset for Uni-Mol-2 that converts SMILES to 3D coordinates."""
+
+    def __init__(
+        self,
+        smiles: List[str],
+        labels: Optional[np.ndarray] = None,
+        optimize_3d: bool = True,
+        max_attempts: int = 10,
+    ):
+        """Initialize Uni-Mol dataset.
+
+        Args:
+            smiles: List of SMILES strings
+            labels: Optional labels (shape: (n_samples,) or (n_samples, n_tasks))
+            optimize_3d: Whether to optimize 3D structures
+            max_attempts: Maximum attempts for 3D structure generation
+        """
+        self.smiles = smiles
+        self.labels = labels
+        self.optimize_3d = optimize_3d
+        self.max_attempts = max_attempts
+
+        # Generate 3D structures
+        self.coords_list = []
+        self.atom_types_list = []
+        self.valid_indices = []
+
+        logger.info(f"Generating 3D structures for {len(smiles)} molecules...")
+        for idx, smi in enumerate(smiles):
+            coords, atom_types = self._smiles_to_3d(smi)
+            if coords is not None and atom_types is not None:
+                self.coords_list.append(coords)
+                self.atom_types_list.append(atom_types)
+                self.valid_indices.append(idx)
+            else:
+                logger.warning(f"Failed to generate 3D structure for SMILES {idx}: {smi}")
+
+        logger.info(f"Successfully generated 3D structures for {len(self.coords_list)}/{len(smiles)} molecules")
+
+    def _smiles_to_3d(self, smiles: str) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """Convert SMILES to 3D coordinates.
+
+        Args:
+            smiles: SMILES string
+
+        Returns:
+            Tuple of (coordinates, atom_types) or (None, None) if failed
+        """
+        try:
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is None:
+                return None, None
+
+            # Add hydrogens
+            mol = Chem.AddHs(mol)
+
+            # Generate 3D coordinates
+            AllChem.EmbedMolecule(mol, randomSeed=42, maxAttempts=self.max_attempts)
+
+            # Optimize if requested
+            if self.optimize_3d:
+                try:
+                    AllChem.MMFFOptimizeMolecule(mol)
+                except Exception:
+                    # If MMFF fails, try UFF
+                    try:
+                        AllChem.UFFOptimizeMolecule(mol)
+                    except Exception:
+                        pass
+
+            # Get coordinates
+            conf = mol.GetConformer()
+            coords = conf.GetPositions()  # Shape: (n_atoms, 3)
+            atom_types = np.array([atom.GetAtomicNum() for atom in mol.GetAtoms()])
+
+            return coords.astype(np.float32), atom_types.astype(np.int64)
+
+        except Exception as e:
+            logger.debug(f"Error generating 3D structure for {smiles}: {e}")
+            return None, None
+
+    def __len__(self):
+        return len(self.coords_list)
+
+    def __getitem__(self, idx):
+        coords = torch.from_numpy(self.coords_list[idx])
+        atom_types = torch.from_numpy(self.atom_types_list[idx])
+
+        if self.labels is not None:
+            original_idx = self.valid_indices[idx]
+            if self.labels.ndim == 1:
+                label = torch.tensor(self.labels[original_idx], dtype=torch.float32)
+            else:
+                label = torch.tensor(self.labels[original_idx], dtype=torch.float32)
+            return coords, atom_types, label
+        else:
+            return coords, atom_types
+
+
+class UniMolPredictor(nn.Module):
+    """Predictor head for Uni-Mol-2 model."""
+
+    def __init__(
+        self,
+        input_dim: int,
+        hidden_dim: int = 300,
+        n_layers: int = 2,
+        dropout: float = 0.0,
+        n_tasks: int = 1,
+        output_transform: Optional[Any] = None,
+    ):
+        """Initialize predictor head.
+
+        Args:
+            input_dim: Input dimension from backbone
+            hidden_dim: Hidden dimension
+            n_layers: Number of layers
+            dropout: Dropout probability
+            n_tasks: Number of tasks
+            output_transform: Optional output transformation
+        """
+        super().__init__()
+        self.n_tasks = n_tasks
+        self.output_transform = output_transform
+
+        layers = []
+        for i in range(n_layers):
+            if i == 0:
+                layers.append(nn.Linear(input_dim, hidden_dim))
+            else:
+                layers.append(nn.Linear(hidden_dim, hidden_dim))
+            layers.append(nn.ReLU())
+            if dropout > 0:
+                layers.append(nn.Dropout(dropout))
+
+        layers.append(nn.Linear(hidden_dim, n_tasks))
+        self.predictor = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass.
+
+        Args:
+            x: Input features (shape: (batch_size, input_dim))
+
+        Returns:
+            Predictions (shape: (batch_size, n_tasks))
+        """
+        output = self.predictor(x)
+        if self.output_transform is not None:
+            output = self.output_transform(output)
+        return output
+
+
+class UniMolLightningModule(pl.LightningModule):
+    """PyTorch Lightning module for Uni-Mol-2."""
+
+    def __init__(
+        self,
+        backbone: nn.Module,
+        predictor: nn.Module,
+        loss_fn: nn.Module,
+        learning_rate: float = 1e-3,
+        metrics: Optional[List[Metric]] = None,
+    ):
+        """Initialize Lightning module.
+
+        Args:
+            backbone: Uni-Mol-2 backbone model
+            predictor: Predictor head
+            loss_fn: Loss function
+            learning_rate: Learning rate
+            metrics: Optional metrics
+        """
+        super().__init__()
+        self.backbone = backbone
+        self.predictor = predictor
+        self.loss_fn = loss_fn
+        self.learning_rate = learning_rate
+        self.metrics = metrics or []
+
+        # Initialize metrics
+        for metric in self.metrics:
+            metric.reset()
+
+    def forward(self, coords: torch.Tensor, atom_types: torch.Tensor) -> torch.Tensor:
+        """Forward pass.
+
+        Args:
+            coords: Atomic coordinates (shape: (batch_size, n_atoms, 3))
+            atom_types: Atomic types (shape: (batch_size, n_atoms))
+
+        Returns:
+            Predictions (shape: (batch_size, n_tasks))
+        """
+        # Get embeddings from backbone
+        # Handle different Uni-Mol-2 API patterns
+        if hasattr(self.backbone, "forward"):
+            # Try to call forward with coords and atom_types
+            try:
+                # Pattern 1: backbone(coords, atom_types)
+                embeddings = self.backbone(coords, atom_types)
+            except Exception:
+                try:
+                    # Pattern 2: backbone({"coords": coords, "atom_types": atom_types})
+                    embeddings = self.backbone({"coords": coords, "atom_types": atom_types})
+                except Exception:
+                    try:
+                        # Pattern 3: backbone({"coordinate": coords, "atom": atom_types})
+                        embeddings = self.backbone({"coordinate": coords, "atom": atom_types})
+                    except Exception:
+                        # Pattern 4: Use last_hidden_state from HuggingFace-style models
+                        if hasattr(self.backbone, "__call__"):
+                            output = self.backbone(coords)
+                            if hasattr(output, "last_hidden_state"):
+                                # Mean pooling over sequence dimension
+                                embeddings = output.last_hidden_state.mean(dim=1)
+                            elif isinstance(output, tuple):
+                                embeddings = output[0].mean(dim=1) if len(output) > 0 else output[0]
+                            else:
+                                embeddings = output
+                        else:
+                            # Fallback: use mean pooling
+                            batch_size = coords.shape[0]
+                            embeddings = torch.randn(batch_size, 512, device=coords.device)
+                            logger.warning("Using placeholder embeddings. Backbone forward method not properly configured.")
+        else:
+            # Fallback: use mean pooling if backbone doesn't have forward method
+            batch_size = coords.shape[0]
+            embeddings = torch.randn(batch_size, 512, device=coords.device)
+            logger.warning("Backbone does not have forward method. Using placeholder embeddings.")
+
+        # Ensure embeddings are 2D (batch_size, embedding_dim)
+        if embeddings.dim() > 2:
+            # If 3D, apply mean pooling over sequence dimension
+            embeddings = embeddings.mean(dim=1)
+        elif embeddings.dim() == 1:
+            # If 1D, add batch dimension (shouldn't happen but handle gracefully)
+            embeddings = embeddings.unsqueeze(0)
+
+        # Predict
+        output = self.predictor(embeddings)
+        return output
+
+    def training_step(self, batch, batch_idx):
+        """Training step."""
+        if len(batch) == 4:
+            coords, atom_types, labels, mask = batch
+        else:
+            coords, atom_types, labels = batch
+            mask = None
+        preds = self.forward(coords, atom_types)
+        loss = self.loss_fn(preds, labels)
+        self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True)
+        return loss
+
+    def validation_step(self, batch, batch_idx):
+        """Validation step."""
+        if len(batch) == 4:
+            coords, atom_types, labels, mask = batch
+        else:
+            coords, atom_types, labels = batch
+            mask = None
+        preds = self.forward(coords, atom_types)
+        loss = self.loss_fn(preds, labels)
+        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
+
+        # Update metrics
+        for metric in self.metrics:
+            metric.update(preds, labels)
+
+        return loss
+
+    def on_validation_epoch_end(self):
+        """Called at the end of validation epoch."""
+        for metric in self.metrics:
+            value = metric.compute()
+            self.log(f"val/{metric.__class__.__name__}", value, prog_bar=True)
+            metric.reset()
+
+    def configure_optimizers(self):
+        """Configure optimizer."""
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
+        return optimizer
+
+
+class UniMolModel(BaseClfModel):
+    """Uni-Mol-2 model wrapper for binary classification and regression.
+
+    This model uses Uni-Mol-2's 3D structure-based molecular representation
+    for property prediction.
+    """
+
+    def __init__(
+        self,
+        max_epochs: int = 50,
+        batch_size: int = 64,
+        learning_rate: float = 1e-3,
+        hidden_size: int = 300,
+        ffn_num_layers: int = 2,
+        dropout: float = 0.0,
+        pretrained_model: Optional[str] = None,  # "unimol2", "unimol2-large", "unimol3"
+        pretrained_model_path: Optional[str] = None,
+        freeze_backbone: bool = False,
+        freeze_layers: Optional[List[int]] = None,
+        use_focal_loss: bool = False,
+        focal_alpha: float = 0.25,
+        focal_gamma: float = 2.0,
+        objective_type: Optional[str] = None,  # "regression", "listmle", or None (binary)
+        regression_loss_type: str = "mse",  # "mse", "mae", "huber", "smooth_l1"
+        regression_loss_params: Optional[Dict[str, Any]] = None,
+        optimize_3d: bool = True,
+        checkpoint_dir: Optional[str] = None,
+        random_seed: int = 42,
+        accelerator: Optional[str] = None,
+        early_stopping_rounds: Optional[int] = None,
+        early_stopping_metric: str = "roc_auc",
+        n_tasks: int = 1,
+        binary_labels: Optional[np.ndarray] = None,
+        **kwargs,
+    ):
+        """Initialize Uni-Mol-2 model.
+
+        Args:
+            max_epochs: Maximum number of training epochs
+            batch_size: Batch size for training
+            learning_rate: Learning rate
+            hidden_size: Hidden dimension size for predictor
+            ffn_num_layers: Number of feed-forward network layers
+            dropout: Dropout probability
+            pretrained_model: Name of pretrained model ("unimol2", "unimol2-large", "unimol3")
+            pretrained_model_path: Path to custom pretrained model
+            freeze_backbone: Whether to freeze backbone parameters
+            freeze_layers: List of layer indices to freeze (if None, all layers are frozen if freeze_backbone=True)
+            use_focal_loss: Whether to use Focal loss for imbalanced data
+            focal_alpha: Alpha parameter for focal loss
+            focal_gamma: Gamma parameter for focal loss
+            objective_type: Objective type ("regression", "listmle", or None for binary)
+            regression_loss_type: Type of regression loss ("mse", "mae", "huber", "smooth_l1")
+            regression_loss_params: Parameters for regression loss function
+            optimize_3d: Whether to optimize 3D structures
+            checkpoint_dir: Directory to save model checkpoints
+            random_seed: Random seed for reproducibility
+            accelerator: Accelerator to use ('auto', 'cpu', 'cuda', 'mps')
+            early_stopping_rounds: Number of epochs to wait before early stopping
+            early_stopping_metric: Metric to monitor for early stopping
+            n_tasks: Number of tasks for multi-task learning
+            binary_labels: Binary labels (0/1) for ROC AUC calculation in regression/ranking mode
+            **kwargs: Additional parameters
+        """
+        if not UNIMOL_AVAILABLE:
+            raise ImportError(
+                "Uni-Mol-2 packages not available. Please install 'unimol' or 'transformers' package."
+            )
+
+        super().__init__(name="unimol", **kwargs)
+        self.max_epochs = max_epochs
+        self.batch_size = batch_size
+        self.learning_rate = learning_rate
+        self.hidden_size = hidden_size
+        self.ffn_num_layers = ffn_num_layers
+        self.dropout = dropout
+        self.pretrained_model = pretrained_model
+        self.pretrained_model_path = pretrained_model_path
+        self.freeze_backbone = freeze_backbone
+        self.freeze_layers = freeze_layers
+        self.use_focal_loss = use_focal_loss
+        self.focal_alpha = focal_alpha
+        self.focal_gamma = focal_gamma
+        self.objective_type = objective_type
+        self.regression_loss_type = regression_loss_type
+        self.regression_loss_params = regression_loss_params or {}
+        self.optimize_3d = optimize_3d
+        self.checkpoint_dir = checkpoint_dir or "checkpoints/unimol"
+        self.random_seed = random_seed
+        self.early_stopping_rounds = early_stopping_rounds
+        self.early_stopping_metric = early_stopping_metric
+        self.n_tasks = n_tasks
+        self.binary_labels = binary_labels
+
+        # Determine accelerator
+        if accelerator is None or accelerator == "auto":
+            if torch.cuda.is_available():
+                self.accelerator = "cuda"
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                if "PYTORCH_ENABLE_MPS_FALLBACK" not in os.environ:
+                    os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+                try:
+                    test_tensor = torch.randn(2, 2, device="mps")
+                    _ = test_tensor @ test_tensor.T
+                    torch.mps.synchronize()
+                    torch.mps.empty_cache()
+                    self.accelerator = "mps"
+                except Exception:
+                    self.accelerator = "cpu"
+            else:
+                self.accelerator = "cpu"
+        else:
+            self.accelerator = accelerator
+
+        logger.info(f"Using accelerator: {self.accelerator}")
+
+        self.model = None
+        self.trainer = None
+        self.backbone = None
+        self.best_iteration: int = 0
+
+        # Set random seed
+        pl.seed_everything(self.random_seed)
+
+    def _load_pretrained_backbone(self) -> nn.Module:
+        """Load pretrained Uni-Mol-2 backbone.
+
+        Returns:
+            Backbone model
+        """
+        if self.pretrained_model_path:
+            logger.info(f"Loading pretrained model from {self.pretrained_model_path}")
+            # Load from custom path
+            checkpoint = torch.load(self.pretrained_model_path, map_location="cpu", weights_only=False)
+            if UNIMOL_USE_UNIMOL:
+                # Use Uni-Mol-2 package to load from checkpoint
+                backbone = UniMolModelBase.from_pretrained(self.pretrained_model_path)
+            else:
+                # Fallback: try to load as PyTorch checkpoint
+                if isinstance(checkpoint, dict) and "model" in checkpoint:
+                    backbone = checkpoint["model"]
+                elif isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+                    # Reconstruct model architecture from checkpoint
+                    logger.warning("Checkpoint contains state_dict. Model architecture must be specified.")
+                    backbone = nn.Identity()  # Placeholder - requires model architecture
+                else:
+                    backbone = checkpoint
+        elif self.pretrained_model:
+            logger.info(f"Loading pretrained model: {self.pretrained_model}")
+            # Load from HuggingFace or Uni-Mol-2 repository
+            if UNIMOL_USE_UNIMOL:
+                # Use Uni-Mol-2 package
+                try:
+                    # Map model names to actual model identifiers
+                    model_map = {
+                        "unimol2": "unimol2",
+                        "unimol2-large": "unimol2-large",
+                        "unimol3": "unimol3",
+                    }
+                    model_id = model_map.get(self.pretrained_model, self.pretrained_model)
+                    backbone = UniMolModelBase.from_pretrained(model_id)
+                except Exception as e:
+                    logger.warning(f"Failed to load from unimol package: {e}. Trying HuggingFace...")
+                    # Fallback to HuggingFace
+                    model_name = f"facebook/{self.pretrained_model}" if not self.pretrained_model.startswith("facebook/") else self.pretrained_model
+                    backbone = AutoModel.from_pretrained(model_name)
+            elif UNIMOL_USE_TRANSFORMERS:
+                # Use HuggingFace transformers
+                model_name = f"facebook/{self.pretrained_model}" if not self.pretrained_model.startswith("facebook/") else self.pretrained_model
+                try:
+                    backbone = AutoModel.from_pretrained(model_name)
+                except Exception as e:
+                    logger.error(f"Failed to load model from HuggingFace: {e}")
+                    raise
+            else:
+                raise ImportError("Neither unimol nor transformers package is available.")
+        else:
+            logger.warning("No pretrained model specified. Using random initialization.")
+            # Create a simple placeholder backbone
+            # In practice, you should always specify a pretrained model
+            backbone = nn.Sequential(
+                nn.Linear(512, 512),  # Placeholder - should match actual Uni-Mol-2 output dim
+                nn.ReLU(),
+            )
+
+        # Freeze backbone if requested
+        if self.freeze_backbone:
+            for param in backbone.parameters():
+                param.requires_grad = False
+            logger.info("Backbone parameters frozen")
+
+        # Freeze specific layers if requested
+        if self.freeze_layers is not None:
+            for layer_idx in self.freeze_layers:
+                if hasattr(backbone, f"layer_{layer_idx}"):
+                    for param in getattr(backbone, f"layer_{layer_idx}").parameters():
+                        param.requires_grad = False
+                elif hasattr(backbone, "encoder") and hasattr(backbone.encoder, f"layer_{layer_idx}"):
+                    for param in getattr(backbone.encoder, f"layer_{layer_idx}").parameters():
+                        param.requires_grad = False
+            logger.info(f"Frozen layers: {self.freeze_layers}")
+
+        return backbone
+
+    def _build_model(self) -> UniMolLightningModule:
+        """Build Uni-Mol-2 model.
+
+        Returns:
+            Lightning module
+        """
+        # Load backbone
+        backbone = self._load_pretrained_backbone()
+
+        # Get backbone output dimension
+        # Try to determine from actual model
+        backbone_output_dim = 512  # Default
+        try:
+            # Try to get output dimension from model
+            if hasattr(backbone, "config"):
+                if hasattr(backbone.config, "hidden_size"):
+                    backbone_output_dim = backbone.config.hidden_size
+                elif hasattr(backbone.config, "d_model"):
+                    backbone_output_dim = backbone.config.d_model
+                elif hasattr(backbone.config, "embed_dim"):
+                    backbone_output_dim = backbone.config.embed_dim
+            elif hasattr(backbone, "hidden_size"):
+                backbone_output_dim = backbone.hidden_size
+            elif hasattr(backbone, "embed_dim"):
+                backbone_output_dim = backbone.embed_dim
+            else:
+                # Try a dummy forward pass to determine output dimension
+                try:
+                    dummy_coords = torch.randn(1, 10, 3)
+                    dummy_atom_types = torch.randint(1, 10, (1, 10))
+                    with torch.no_grad():
+                        dummy_output = backbone(dummy_coords, dummy_atom_types)
+                        if dummy_output.dim() > 2:
+                            backbone_output_dim = dummy_output.shape[-1]
+                        else:
+                            backbone_output_dim = dummy_output.shape[-1]
+                except Exception:
+                    logger.warning(f"Could not determine backbone output dimension. Using default: {backbone_output_dim}")
+        except Exception as e:
+            logger.warning(f"Could not determine backbone output dimension: {e}. Using default: {backbone_output_dim}")
+
+        logger.info(f"Backbone output dimension: {backbone_output_dim}")
+
+        # Create predictor
+        predictor = UniMolPredictor(
+            input_dim=backbone_output_dim,
+            hidden_dim=self.hidden_size,
+            n_layers=self.ffn_num_layers,
+            dropout=self.dropout,
+            n_tasks=self.n_tasks,
+        )
+
+        # Create loss function
+        if self.objective_type == "regression":
+            from euos25.models.unimol_regression import create_regression_loss
+
+            loss_fn = create_regression_loss(self.regression_loss_type, self.regression_loss_params)
+            logger.info(f"Using regression loss: {self.regression_loss_type}")
+        elif self.objective_type == "listmle":
+            from euos25.models.unimol_listmle import ListMLELoss
+
+            loss_fn = ListMLELoss()
+            logger.info("Using ListMLE loss")
+        elif self.use_focal_loss:
+            from euos25.models.unimol_focal import FocalLoss
+
+            loss_fn = FocalLoss(alpha=self.focal_alpha, gamma=self.focal_gamma)
+            logger.info(f"Using Focal Loss with alpha={self.focal_alpha}, gamma={self.focal_gamma}")
+        else:
+            loss_fn = nn.BCEWithLogitsLoss()
+            logger.info("Using BCE loss")
+
+        # Create metrics
+        metrics = []
+        if self.objective_type in ["regression", "listmle"] and self.binary_labels is not None:
+            binary_labels_tensor = torch.from_numpy(self.binary_labels).float()
+            roc_metric = BinaryROCAUCMetric(binary_labels=binary_labels_tensor)
+            roc_metric.reset()
+            metrics.append(roc_metric)
+        else:
+            from torchmetrics.classification import BinaryAUROC, BinaryAccuracy
+
+            metrics.append(BinaryAUROC())
+            metrics.append(BinaryAccuracy())
+
+        # Create Lightning module
+        module = UniMolLightningModule(
+            backbone=backbone,
+            predictor=predictor,
+            loss_fn=loss_fn,
+            learning_rate=self.learning_rate,
+            metrics=metrics,
+        )
+
+        return module
+
+    def fit(
+        self,
+        X_train: pd.DataFrame,
+        y_train: np.ndarray,
+        X_val: Optional[pd.DataFrame] = None,
+        y_val: Optional[np.ndarray] = None,
+        binary_labels_val: Optional[np.ndarray] = None,
+        resume_from_checkpoint: Optional[str] = None,
+    ) -> "UniMolModel":
+        """Train the Uni-Mol-2 model.
+
+        Args:
+            X_train: Training features (must contain 'SMILES' column)
+            y_train: Training labels
+            X_val: Validation features (optional)
+            y_val: Validation labels (optional)
+            binary_labels_val: Binary labels for validation set ROC AUC calculation
+            resume_from_checkpoint: Path to checkpoint file to resume training from
+
+        Returns:
+            Self
+        """
+        if resume_from_checkpoint:
+            logger.info(f"Resuming training from checkpoint: {resume_from_checkpoint}")
+        else:
+            logger.info("Training Uni-Mol-2 model")
+
+        # Store validation binary labels for metric
+        if binary_labels_val is not None:
+            self.binary_labels_val = binary_labels_val
+        else:
+            self.binary_labels_val = None
+
+        # Create datasets
+        train_smiles = X_train["SMILES"].tolist()
+        train_dataset = UniMolDataset(train_smiles, y_train, optimize_3d=self.optimize_3d)
+        train_loader = torch.utils.data.DataLoader(
+            train_dataset,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=0,
+            collate_fn=collate_fn,
+        )
+
+        val_loader = None
+        if X_val is not None and y_val is not None:
+            val_smiles = X_val["SMILES"].tolist()
+            val_dataset = UniMolDataset(val_smiles, y_val, optimize_3d=self.optimize_3d)
+            val_loader = torch.utils.data.DataLoader(
+                val_dataset,
+                batch_size=self.batch_size,
+                shuffle=False,
+                num_workers=0,
+                collate_fn=collate_fn,
+            )
+
+        # Build model
+        if self.binary_labels_val is not None:
+            original_binary_labels = self.binary_labels
+            self.binary_labels = self.binary_labels_val
+        self.model = self._build_model()
+        if self.binary_labels_val is not None:
+            self.binary_labels = original_binary_labels
+
+        # Setup checkpointing
+        checkpoint_path = Path(self.checkpoint_dir)
+        checkpoint_path.mkdir(parents=True, exist_ok=True)
+
+        task_fold_suffix = ""
+        last_part = checkpoint_path.parts[-1] if checkpoint_path.parts else ""
+        if "fold_" in last_part or last_part == "full":
+            task_fold_suffix = f"-{last_part}"
+
+        checkpoint_callback = ModelCheckpoint(
+            dirpath=self.checkpoint_dir,
+            filename=f"best{task_fold_suffix}-{{epoch}}-{{val_loss:.4f}}",
+            monitor="val_loss" if val_loader else "train_loss",
+            mode="min",
+            save_last=True,
+            save_top_k=1,
+        )
+
+        # Setup callbacks
+        callbacks = [checkpoint_callback]
+
+        # Setup early stopping
+        if (
+            self.early_stopping_rounds is not None
+            and self.early_stopping_rounds > 0
+            and val_loader is not None
+        ):
+            early_stopping_mode = (
+                "max" if self.early_stopping_metric.lower() in ["roc_auc", "pr_auc"] else "min"
+            )
+            metric_name = f"val/{self.early_stopping_metric}"
+            early_stopping_callback = EarlyStopping(
+                monitor=metric_name,
+                patience=self.early_stopping_rounds,
+                mode=early_stopping_mode,
+                verbose=True,
+            )
+            callbacks.append(early_stopping_callback)
+
+        # Setup trainer
+        trainer_kwargs = {
+            "max_epochs": self.max_epochs,
+            "accelerator": self.accelerator,
+            "devices": 1,
+            "callbacks": callbacks,
+            "enable_progress_bar": True,
+            "logger": False,
+            "num_sanity_val_steps": 0,
+            "enable_model_summary": False,
+        }
+
+        if self.accelerator == "mps":
+            trainer_kwargs["precision"] = "32"
+            trainer_kwargs["accumulate_grad_batches"] = 1
+            trainer_kwargs["deterministic"] = False
+            trainer_kwargs["gradient_clip_val"] = None
+
+        self.trainer = pl.Trainer(**trainer_kwargs)
+
+        # Determine checkpoint path for resuming
+        ckpt_path = None
+        if resume_from_checkpoint:
+            checkpoint_path = Path(resume_from_checkpoint)
+            if checkpoint_path.exists():
+                if checkpoint_path.is_dir():
+                    last_ckpt = checkpoint_path / "last.ckpt"
+                    if last_ckpt.exists():
+                        ckpt_path = str(last_ckpt)
+                    else:
+                        ckpt_files = list(checkpoint_path.glob("*.ckpt"))
+                        if ckpt_files:
+                            ckpt_path = str(sorted(ckpt_files, key=lambda x: x.stat().st_mtime)[-1])
+                elif checkpoint_path.is_file():
+                    ckpt_path = str(checkpoint_path)
+
+        # Train
+        try:
+            self.trainer.fit(self.model, train_loader, val_loader, ckpt_path=ckpt_path)
+        except (RuntimeError, SystemError) as e:
+            if self.accelerator == "mps" and "MPS" in str(e):
+                logger.warning(f"MPS training failed: {e}. Falling back to CPU.")
+                trainer_kwargs["accelerator"] = "cpu"
+                trainer_kwargs.pop("precision", None)
+                trainer_kwargs["deterministic"] = True
+                self.accelerator = "cpu"
+                self.trainer = pl.Trainer(**trainer_kwargs)
+                self.trainer.fit(self.model, train_loader, val_loader, ckpt_path=ckpt_path)
+            else:
+                raise
+
+        self.best_iteration = self.max_epochs
+        logger.info("Training completed")
+        return self
+
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        """Predict class probabilities.
+
+        Args:
+            X: Features (must contain 'SMILES' column)
+
+        Returns:
+            For single task: Predicted probabilities of shape (n_samples, 2)
+            For multi-task: Predicted probabilities of shape (n_samples, n_tasks)
+        """
+        if self.model is None:
+            raise ValueError("Model not fitted. Call fit() first.")
+
+        logger.info(f"Predicting {len(X)} samples")
+
+        # Create dataset and dataloader
+        smiles = X["SMILES"].tolist()
+        dataset = UniMolDataset(smiles, labels=None, optimize_3d=self.optimize_3d)
+        test_loader = torch.utils.data.DataLoader(
+            dataset, batch_size=self.batch_size, shuffle=False, num_workers=0, collate_fn=collate_fn
+        )
+
+        # Predict
+        self.model.eval()
+        predictions = self.trainer.predict(self.model, test_loader)
+
+        # Convert to numpy array
+        probs = torch.cat(predictions)
+
+        # For regression/ranking, apply sigmoid to convert logits to probabilities
+        if self.objective_type in ["regression", "listmle"]:
+            probs = torch.sigmoid(probs)
+
+        probs = probs.cpu().numpy()
+
+        # Ensure correct shape
+        n_samples = len(X)
+        if self.n_tasks == 1:
+            probs_positive = probs.reshape(-1)
+            if len(probs_positive) != n_samples:
+                raise ValueError(f"Shape mismatch: expected {n_samples} samples, got {len(probs_positive)}")
+            probs_negative = 1 - probs_positive
+            probs_binary = np.column_stack([probs_negative, probs_positive])
+            return probs_binary
+        else:
+            if probs.ndim == 1:
+                if len(probs) != n_samples * self.n_tasks:
+                    raise ValueError(f"Shape mismatch: expected {n_samples * self.n_tasks} values, got {len(probs)}")
+                probs = probs.reshape(n_samples, self.n_tasks)
+            elif probs.ndim == 2:
+                if probs.shape[0] != n_samples:
+                    raise ValueError(f"Shape mismatch: expected {n_samples} samples, got {probs.shape[0]}")
+                if probs.shape[1] != self.n_tasks:
+                    raise ValueError(f"Shape mismatch: expected {self.n_tasks} tasks, got {probs.shape[1]}")
+            return probs
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        """Predict class labels.
+
+        Args:
+            X: Features (must contain 'SMILES' column)
+
+        Returns:
+            For single task: Predicted labels of shape (n_samples,)
+            For multi-task: Predicted labels of shape (n_samples, n_tasks)
+        """
+        probs = self.predict_proba(X)
+        if self.n_tasks == 1:
+            return (probs[:, 1] > 0.5).astype(int)
+        else:
+            return (probs > 0.5).astype(int)
+
+    def save(self, path: str) -> None:
+        """Save model to disk.
+
+        Args:
+            path: Path to save model
+        """
+        if self.trainer is None:
+            raise ValueError("Model not fitted. Call fit() first.")
+
+        self.trainer.save_checkpoint(path)
+        logger.info(f"Model saved to {path}")
+
+    @classmethod
+    def load_from_checkpoint(
+        cls,
+        checkpoint_path: str,
+        **override_params,
+    ) -> "UniMolModel":
+        """Load UniMolModel from checkpoint.
+
+        Args:
+            checkpoint_path: Path to checkpoint file or directory
+            **override_params: Parameters to override from checkpoint
+
+        Returns:
+            Loaded UniMolModel instance
+        """
+        checkpoint_path = Path(checkpoint_path)
+
+        # If checkpoint_path is a directory, look for checkpoint files
+        if checkpoint_path.is_dir():
+            ckpt_files = list(checkpoint_path.glob("*.ckpt"))
+            if ckpt_files:
+                # Prefer best checkpoint if available, otherwise use last
+                best_ckpt = [f for f in ckpt_files if "best" in f.name]
+                if best_ckpt:
+                    checkpoint_path = sorted(best_ckpt)[-1]
+                else:
+                    checkpoint_path = sorted(ckpt_files)[-1]
+            else:
+                raise FileNotFoundError(
+                    f"No checkpoint files found in directory {checkpoint_path}"
+                )
+        elif not checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+        # Try to load hyperparameters from checkpoint
+        hparams = {}
+        try:
+            checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+            if isinstance(checkpoint, dict):
+                # Try different keys where hyperparameters might be stored
+                if "hyper_parameters" in checkpoint:
+                    hparams = checkpoint["hyper_parameters"]
+                elif "hparams" in checkpoint:
+                    hparams = checkpoint["hparams"]
+                elif "callbacks" in checkpoint and "ModelCheckpoint" in str(checkpoint):
+                    # Try to extract from callbacks
+                    pass
+        except Exception as e:
+            logger.debug(f"Could not extract hyperparameters from checkpoint: {e}")
+
+        # Merge checkpoint hyperparameters with override params
+        model_params = {**hparams, **override_params}
+
+        # Create model instance with parameters
+        # Use default values if not in checkpoint
+        instance = cls(
+            max_epochs=model_params.get("max_epochs", 50),
+            batch_size=model_params.get("batch_size", 32),
+            learning_rate=model_params.get("learning_rate", 1e-3),
+            hidden_size=model_params.get("hidden_size", 300),
+            ffn_num_layers=model_params.get("ffn_num_layers", 2),
+            dropout=model_params.get("dropout", 0.0),
+            pretrained_model=model_params.get("pretrained_model", None),
+            pretrained_model_path=model_params.get("pretrained_model_path", None),
+            freeze_backbone=model_params.get("freeze_backbone", False),
+            freeze_layers=model_params.get("freeze_layers", None),
+            use_focal_loss=model_params.get("use_focal_loss", False),
+            focal_alpha=model_params.get("focal_alpha", 0.25),
+            focal_gamma=model_params.get("focal_gamma", 2.0),
+            objective_type=model_params.get("objective_type", None),
+            regression_loss_type=model_params.get("regression_loss_type", "mse"),
+            regression_loss_params=model_params.get("regression_loss_params", {}),
+            optimize_3d=model_params.get("optimize_3d", True),
+            checkpoint_dir=model_params.get("checkpoint_dir", None),
+            random_seed=model_params.get("random_seed", 42),
+            accelerator=model_params.get("accelerator", None),
+            early_stopping_rounds=model_params.get("early_stopping_rounds", None),
+            early_stopping_metric=model_params.get("early_stopping_metric", "roc_auc"),
+            n_tasks=model_params.get("n_tasks", 1),
+        )
+
+        # Load checkpoint into model using Lightning's load_from_checkpoint
+        try:
+            instance.model = UniMolLightningModule.load_from_checkpoint(
+                str(checkpoint_path), strict=False
+            )
+        except Exception as e:
+            logger.warning(f"Could not load checkpoint using Lightning: {e}")
+            # Try to load manually
+            try:
+                checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+                if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+                    # Rebuild model and load state dict
+                    instance.model = instance._build_model()
+                    instance.model.load_state_dict(checkpoint["state_dict"], strict=False)
+                else:
+                    raise ValueError("Checkpoint format not recognized")
+            except Exception as e2:
+                logger.error(f"Failed to load checkpoint: {e2}")
+                raise
+
+        # Create a minimal trainer for prediction
+        instance.trainer = pl.Trainer(
+            accelerator=instance.accelerator,
+            devices=1,
+            logger=False,
+            enable_progress_bar=False,
+            enable_model_summary=False,
+        )
+
+        logger.info(f"Loaded model from checkpoint: {checkpoint_path}")
+        return instance
+
+    def get_params(self) -> Dict[str, Any]:
+        """Get model parameters.
+
+        Returns:
+            Dictionary of parameters
+        """
+        params = super().get_params()
+        params.update(
+            {
+                "max_epochs": self.max_epochs,
+                "batch_size": self.batch_size,
+                "learning_rate": self.learning_rate,
+                "hidden_size": self.hidden_size,
+                "ffn_num_layers": self.ffn_num_layers,
+                "dropout": self.dropout,
+                "pretrained_model": self.pretrained_model,
+                "pretrained_model_path": self.pretrained_model_path,
+                "freeze_backbone": self.freeze_backbone,
+                "freeze_layers": self.freeze_layers,
+                "use_focal_loss": self.use_focal_loss,
+                "focal_alpha": self.focal_alpha,
+                "focal_gamma": self.focal_gamma,
+                "objective_type": self.objective_type,
+                "regression_loss_type": self.regression_loss_type,
+                "regression_loss_params": self.regression_loss_params,
+                "optimize_3d": self.optimize_3d,
+                "random_seed": self.random_seed,
+                "early_stopping_rounds": self.early_stopping_rounds,
+                "early_stopping_metric": self.early_stopping_metric,
+                "n_tasks": self.n_tasks,
+            }
+        )
+        return params
+

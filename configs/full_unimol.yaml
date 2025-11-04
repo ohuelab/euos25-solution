@@ -1,0 +1,54 @@
+# Full Uni-Mol-2 configuration for production training
+# Uses Uni-Mol-2 pretrained model for molecular property prediction
+
+seed: 42
+folds: 5
+scaffold_min_size: 10
+
+# Task configuration
+task: "y_trans_any"  # Will be overridden by --task option in CLI
+metrics:
+  - "roc_auc"
+  - "pr_auc"
+
+# Model configuration
+model:
+  name: "unimol"
+  params:
+    max_epochs: 1000
+    batch_size: 32  # Smaller batch size due to 3D structure processing
+    learning_rate: 0.0001  # Lower LR for foundation model fine-tuning
+    hidden_size: 300
+    ffn_num_layers: 2
+    dropout: 0.1
+    pretrained_model: "unimol2"  # Options: "unimol2", "unimol2-large", "unimol3"
+    pretrained_model_path: null  # Path to custom pretrained model (optional)
+    freeze_backbone: false  # Whether to freeze backbone parameters
+    freeze_layers: null  # List of layer indices to freeze (optional)
+    optimize_3d: true  # Whether to optimize 3D structures
+    checkpoint_dir: "outputs/full_unimol/checkpoints"
+
+# No featurizers needed for Uni-Mol-2
+featurizers: []
+
+# Imbalance handling
+imbalance:
+  use_pos_weight: false
+  pos_weight_from_data: false
+  use_sampling: false
+  use_focal_loss: false
+
+# Optuna (can be enabled for hyperparameter tuning)
+optuna:
+  enable: false
+
+# Early stopping
+early_stopping_rounds: 30
+early_stopping_metric: "roc_auc"
+
+# Logging
+log_level: "INFO"
+
+# Note: Uni-Mol-2 pretrained models will be downloaded automatically
+# Make sure 'unimol' or 'transformers' package is installed
+

@@ -10,4 +10,10 @@ except ImportError:
     CHEMPROP_AVAILABLE = False
     ChemPropModel = None
 
-__all__ = ["LGBMClassifier", "ChemPropModel", "CHEMPROP_AVAILABLE"]
+try:
+    from euos25.models.unimol import UniMolModel, UNIMOL_AVAILABLE
+except ImportError:
+    UNIMOL_AVAILABLE = False
+    UniMolModel = None
+
+__all__ = ["LGBMClassifier", "ChemPropModel", "CHEMPROP_AVAILABLE", "UniMolModel", "UNIMOL_AVAILABLE"]

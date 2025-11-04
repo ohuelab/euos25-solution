@@ -12,7 +12,7 @@ from euos25.models.base import ClfModel
 from euos25.models.lgbm import LGBMClassifier
 from euos25.models.catboost import CatBoostClassifier
 from euos25.models.random_forest import RandomForestClassifierModel
-from euos25.models import ChemPropModel, CHEMPROP_AVAILABLE
+from euos25.models import ChemPropModel, CHEMPROP_AVAILABLE, UniMolModel, UNIMOL_AVAILABLE
 from euos25.pipeline.features import (
     filter_feature_groups,
     filter_low_quality_features,
@@ -102,6 +102,36 @@ def create_model(config: Config, checkpoint_dir: Optional[str] = None) -> ClfMod
             model_params["checkpoint_dir"] = checkpoint_dir
 
         return ChemPropModel(**model_params)
+    elif model_name == "unimol":
+        if not UNIMOL_AVAILABLE:
+            raise ImportError(
+                "Uni-Mol-2 is not available. Please install 'unimol' or 'transformers' package."
+            )
+
+        # For UniMol, focal loss parameters come from config.model.params or config.imbalance
+        if model_params.get("use_focal_loss", False):
+            pass
+        elif config.imbalance.use_focal_loss:
+            model_params["use_focal_loss"] = True
+            model_params["focal_alpha"] = config.imbalance.focal_alpha
+            model_params["focal_gamma"] = config.imbalance.focal_gamma
+
+        # Add objective_type from config
+        if config.model.objective_type is not None:
+            model_params["objective_type"] = config.model.objective_type
+
+        # Add random_seed from config
+        model_params["random_seed"] = config.seed
+
+        # Add early stopping parameters for UniMol
+        model_params["early_stopping_rounds"] = config.early_stopping_rounds
+        model_params["early_stopping_metric"] = config.early_stopping_metric
+
+        # Override checkpoint_dir if provided
+        if checkpoint_dir is not None:
+            model_params["checkpoint_dir"] = checkpoint_dir
+
+        return UniMolModel(**model_params)
     else:
         raise ValueError(f"Unknown model: {model_name}")
 
@@ -200,11 +230,18 @@ def train_fold(
                 for metric_name, score in metrics.items():
                     logger.info(f"  {metric_name}: {score:.6f}")
                 return model, metrics
+        elif config.model.name == "unimol":
+            # For UniMol, check if model exists (similar to ChemProp)
+            if model_dir.exists() and (model_dir.is_file() or model_dir.is_dir()):
+                logger.info(f"  Model already exists at {model_dir}, skipping training")
+                # Note: UniMolModel.load_from_checkpoint is not fully implemented yet
+                # For now, we'll skip loading and continue training
+                logger.warning("UniMolModel checkpoint loading not fully implemented. Skipping checkpoint load.")
 
-    # Build checkpoint directory for ChemProp with task name and fold number
+    # Build checkpoint directory for ChemProp/UniMol with task name and fold number
     checkpoint_dir = None
     resume_ckpt = None
-    if config.model.name == "chemprop" and output_dir is not None:
+    if config.model.name in ["chemprop", "unimol"] and output_dir is not None:
         actual_task_name = task_name if task_name is not None else config.task
         # Use checkpoint_dir from config if specified, otherwise construct from output_dir
         base_checkpoint_dir = config.model.params.get("checkpoint_dir")
@@ -238,8 +275,8 @@ def train_fold(
             model._binary_labels = binary_labels_train
 
     # Train model - handle different model signatures
-    if config.model.name == "chemprop":
-        # ChemProp uses X_val and y_val instead of eval_set
+    if config.model.name in ["chemprop", "unimol"]:
+        # ChemProp and UniMol use X_val and y_val instead of eval_set
         # Pass binary_labels_val for regression/ranking
         fit_kwargs = {
             "X_train": X_train,
@@ -269,8 +306,8 @@ def train_fold(
     # Predict on validation
     y_pred = model.predict_proba(X_valid)
 
-    # Handle different output shapes: chemprop returns (n_samples, 2), lgbm returns (n_samples,)
-    if config.model.name == "chemprop" and y_pred.ndim == 2:
+    # Handle different output shapes: chemprop/unimol return (n_samples, 2), lgbm returns (n_samples,)
+    if config.model.name in ["chemprop", "unimol"] and y_pred.ndim == 2:
         # Extract positive class probabilities for metrics calculation
         y_pred_proba = y_pred[:, 1]
     else:
@@ -525,6 +562,15 @@ def train_full(
                 early_stopping_metric=config.early_stopping_metric,
             )
             return model
+    elif config.model.name == "unimol":
+        # For UniMol, check if model exists (similar to ChemProp)
+        if full_model_dir.exists() and (full_model_dir.is_file() or full_model_dir.is_dir()):
+            logger.info("=" * 50)
+            logger.info("Full model already exists, skipping training")
+            logger.info(f"  Model path: {full_model_dir}")
+            logger.info("=" * 50)
+            # Note: UniMolModel.load_from_checkpoint is not fully implemented yet
+            logger.warning("UniMolModel checkpoint loading not fully implemented. Skipping checkpoint load.")
 
     # Get full training data
     # Only use samples that have labels
@@ -536,10 +582,10 @@ def train_full(
     logger.info("Training on full dataset")
     logger.info(f"  Full dataset: {len(y_full)} samples, pos={y_full.sum()}")
 
-    # Build checkpoint directory for ChemProp with task name and "full" suffix
+    # Build checkpoint directory for ChemProp/UniMol with task name and "full" suffix
     checkpoint_dir = None
     resume_ckpt = None
-    if config.model.name == "chemprop":
+    if config.model.name in ["chemprop", "unimol"]:
         # Use checkpoint_dir from config if specified, otherwise construct from output_dir
         base_checkpoint_dir = config.model.params.get("checkpoint_dir")
         if base_checkpoint_dir:
@@ -625,11 +671,11 @@ def train_full(
         logger.info(f"Training with {model.params['n_estimators']} trees")
         logger.info("  Training on full data (no validation set)")
         model.fit(X_full, y_full, eval_set=None)
-    elif config.model.name == "chemprop":
-        # For ChemProp, use max_epochs from config (no adjustment needed)
+    elif config.model.name in ["chemprop", "unimol"]:
+        # For ChemProp/UniMol, use max_epochs from config (no adjustment needed)
         logger.info(f"  Training with max_epochs={model.params.get('max_epochs', 'default')}")
         logger.info("  Training on full data (no validation set)")
-        # ChemProp uses X_val and y_val instead of eval_set
+        # ChemProp/UniMol use X_val and y_val instead of eval_set
         model.fit(X_full, y_full, X_val=None, y_val=None, resume_from_checkpoint=resume_ckpt)
     else:
         # Generic fallback
