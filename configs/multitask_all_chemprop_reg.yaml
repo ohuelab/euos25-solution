@@ -1,0 +1,58 @@
+# Multi-task ChemProp configuration for all 4 tasks (Regression)
+# Tasks: transmittance340, transmittance450, fluorescence340_450, fluorescence480
+# Uses regression objective instead of binary classification
+
+seed: 42
+folds: 5
+scaffold_min_size: 10
+
+# Multi-task configuration
+tasks:
+  - "transmittance340"
+  - "transmittance450"
+  - "fluorescence340_450"
+  - "fluorescence480"
+metrics:
+  - "roc_auc"
+  - "pr_auc"
+
+# Model configuration - ChemProp with regression objective
+model:
+  name: "chemprop"
+  objective_type: "regression"
+  params:
+    max_epochs: 1000
+    batch_size: 128
+    learning_rate: 0.001
+    hidden_size: 300
+    depth: 3
+    dropout: 0.1
+    aggregation: "mean"
+    batch_norm: true
+    ffn_num_layers: 2
+    use_foundation: false
+    checkpoint_dir: "outputs/multitask_all_chemprop_reg/checkpoints"
+
+# No featurizers needed for ChemProp
+featurizers: []
+
+# Imbalance handling - Use quantitative values for regression
+imbalance:
+  use_pos_weight: false
+  pos_weight_from_data: false
+  use_sampling: false
+  use_focal_loss: false
+  use_quantitative: true
+  quantitative_normalize: true
+
+# Optuna (can be enabled for hyperparameter tuning)
+optuna:
+  enable: false
+
+# Early stopping
+early_stopping_rounds: 30
+early_stopping_metric: "roc_auc"
+
+# Logging
+log_level: "INFO"
+
