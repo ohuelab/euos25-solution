@@ -153,7 +153,7 @@ def train(features, splits, config, outdir, label_col, data, task):
             q_min = quantitative_values.min()
             q_max = quantitative_values.max()
             if q_max > q_min:
-                labels = (quantitative_values - q_min) / (q_max - q_min)
+                labels = - (quantitative_values - q_min) / (q_max - q_min)
                 logger.info(f"Normalized quantitative values: min={q_min:.4f}, max={q_max:.4f}")
             else:
                 labels = quantitative_values
