@@ -105,7 +105,8 @@ def create_model(config: Config, checkpoint_dir: Optional[str] = None) -> ClfMod
     elif model_name == "unimol":
         if not UNIMOL_AVAILABLE:
             raise ImportError(
-                "Uni-Mol-2 is not available. Please install 'unimol' or 'transformers' package."
+                "Uni-Mol is not available. Please install 'unimol_tools' package. "
+                "Install with: pip install unimol_tools"
             )
 
         # For UniMol, focal loss parameters come from config.model.params or config.imbalance
@@ -130,6 +131,11 @@ def create_model(config: Config, checkpoint_dir: Optional[str] = None) -> ClfMod
         # Override checkpoint_dir if provided
         if checkpoint_dir is not None:
             model_params["checkpoint_dir"] = checkpoint_dir
+
+        # Automatically set cache_dir if not specified in config
+        if "cache_dir" not in model_params or model_params["cache_dir"] is None:
+            model_params["cache_dir"] = "data/processed/unimol_3d_cache"
+            logger.info(f"Automatically setting cache_dir to: {model_params['cache_dir']}")
 
         return UniMolModel(**model_params)
     else:
