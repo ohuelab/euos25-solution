@@ -843,8 +843,8 @@ class UniMolModel(BaseClfModel):
             elif self.pretrained_model.startswith("unimol2-"):
                 # Extract size from name like "unimol2-310m"
                 model_name = "unimolv2"
-                size_str = self.pretrained_model.replace("unimol2-", "").lower()
-                if size_str in ["84m", "164m", "310m", "570m", "1.1b"]:
+                size_str = self.pretrained_model.replace("unimol2-", "")
+                if size_str in ["84m", "164m", "310m", "570m", "1.1B"]:
                     model_size = size_str
                 else:
                     logger.warning(f"Unknown model size: {size_str}, using default 84m")
@@ -1209,11 +1209,6 @@ class UniMolModel(BaseClfModel):
 
         if strategy is not None:
             trainer_kwargs["strategy"] = strategy
-            # For DDP, ensure validation data is not distributed across processes
-            # This ensures early stopping works correctly with the same validation set on all GPUs
-            # Training data will be distributed, but validation data will be the same on all processes
-            trainer_kwargs["replace_sampler_ddp"] = False
-            logger.info("Validation data will be used on all GPUs (not distributed) for consistent early stopping")
 
         if self.accelerator == "mps":
             trainer_kwargs["precision"] = "32"
