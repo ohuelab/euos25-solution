@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 from lightning import pytorch as pl
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
+from lightning.pytorch.strategies import DDPStrategy
 from rdkit import Chem
 from rdkit.Chem import AllChem
 from torchmetrics import Metric
@@ -1174,7 +1175,7 @@ class UniMolModel(BaseClfModel):
         # Setup strategy for DDP
         strategy = None
         if num_devices > 1 and self.accelerator == "cuda":
-            strategy = "ddp"
+            strategy = DDPStrategy(find_unused_parameters=True)
             logger.info(f"Using DDP (Distributed Data Parallel) with {num_devices} GPUs")
             logger.info(f"Effective batch size: {self.batch_size * num_devices} (batch_size={self.batch_size} per GPU)")
 
