@@ -437,6 +437,8 @@ class ChemPropModel(BaseClfModel):
         y_val: Optional[np.ndarray] = None,
         binary_labels_val: Optional[np.ndarray] = None,
         resume_from_checkpoint: Optional[str] = None,
+        task_name: Optional[str] = None,
+        fold_name: Optional[str] = None,
     ) -> "ChemPropModel":
         """Train the ChemProp model.
 
@@ -449,6 +451,8 @@ class ChemPropModel(BaseClfModel):
                               (used with regression/ranking objectives)
             resume_from_checkpoint: Path to checkpoint file to resume training from.
                                    If None, training starts from scratch.
+            task_name: Task name for organizing checkpoints (e.g., "transmittance340")
+            fold_name: Fold name for organizing checkpoints (e.g., "fold_0", "full")
 
         Returns:
             Self
@@ -497,20 +501,29 @@ class ChemPropModel(BaseClfModel):
             self.early_stopping_metric.lower(), "val_loss"
         )
 
-        # Setup checkpointing
-        # Include task and fold info in filename if available from checkpoint_dir path
-        checkpoint_path = Path(self.checkpoint_dir)
-        # Extract task and fold/full from path if available (e.g., .../task_name/fold_0/... or .../task_name/full/...)
+        # Setup checkpointing with task and fold separation
+        checkpoint_dir = Path(self.checkpoint_dir)
+
+        # Add task_name and fold_name to checkpoint_dir if provided
+        # This ensures checkpoints are separated by task and fold to avoid conflicts
+        if task_name is not None:
+            checkpoint_dir = checkpoint_dir / task_name
+            if fold_name is not None:
+                checkpoint_dir = checkpoint_dir / fold_name
+
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create filename suffix for checkpoint files
         task_fold_suffix = ""
-        last_part = checkpoint_path.parts[-1] if checkpoint_path.parts else ""
-        if "fold_" in last_part or last_part == "full":
-            task_fold_suffix = f"-{last_part}"
-            if len(checkpoint_path.parts) > 1:
-                task_name = checkpoint_path.parts[-2]
-                task_fold_suffix = f"-{task_name}{task_fold_suffix}"
+        if task_name is not None and fold_name is not None:
+            task_fold_suffix = f"-{task_name}-{fold_name}"
+        elif task_name is not None:
+            task_fold_suffix = f"-{task_name}"
+        elif fold_name is not None:
+            task_fold_suffix = f"-{fold_name}"
 
         checkpoint_callback = ModelCheckpoint(
-            dirpath=self.checkpoint_dir,
+            dirpath=str(checkpoint_dir),
             filename=f"best{task_fold_suffix}-{{epoch}}-{{val_loss:.4f}}",
             monitor="val_loss" if val_loader else "train_loss",
             mode="min",

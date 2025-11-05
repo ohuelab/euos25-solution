@@ -244,22 +244,24 @@ def train_fold(
                 # For now, we'll skip loading and continue training
                 logger.warning("UniMolModel checkpoint loading not fully implemented. Skipping checkpoint load.")
 
-    # Build checkpoint directory for ChemProp/UniMol with task name and fold number
+    # Build checkpoint directory for ChemProp/UniMol
+    # Note: task_name and fold_name will be added in fit() method to ensure proper separation
     checkpoint_dir = None
     resume_ckpt = None
     if config.model.name in ["chemprop", "unimol"] and output_dir is not None:
         actual_task_name = task_name if task_name is not None else config.task
         # Use checkpoint_dir from config if specified, otherwise construct from output_dir
+        # Don't add task_name and fold_name here - let fit() method handle it
         base_checkpoint_dir = config.model.params.get("checkpoint_dir")
         if base_checkpoint_dir:
-            checkpoint_dir = str(Path(base_checkpoint_dir) / actual_task_name / f"fold_{fold_idx}")
+            checkpoint_dir = str(Path(base_checkpoint_dir))
         else:
-            checkpoint_dir = str(output_dir / "checkpoints" / f"fold_{fold_idx}")
-        # Ensure directory exists
+            checkpoint_dir = str(output_dir / "checkpoints")
+        # Ensure base directory exists
         Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
 
-        # Check if there's a checkpoint to resume from
-        checkpoint_path = Path(checkpoint_dir)
+        # Check if there's a checkpoint to resume from (in task/fold subdirectory)
+        checkpoint_path = Path(checkpoint_dir) / actual_task_name / f"fold_{fold_idx}"
         last_ckpt = checkpoint_path / "last.ckpt"
         if last_ckpt.exists():
             resume_ckpt = str(last_ckpt)
@@ -284,12 +286,15 @@ def train_fold(
     if config.model.name in ["chemprop", "unimol"]:
         # ChemProp and UniMol use X_val and y_val instead of eval_set
         # Pass binary_labels_val for regression/ranking
+        actual_task_name = task_name if task_name is not None else config.task
         fit_kwargs = {
             "X_train": X_train,
             "y_train": y_train,
             "X_val": X_valid,
             "y_val": y_valid,
             "resume_from_checkpoint": resume_ckpt,
+            "task_name": actual_task_name,
+            "fold_name": f"fold_{fold_idx}",
         }
         if binary_labels_valid is not None:
             fit_kwargs["binary_labels_val"] = binary_labels_valid
@@ -588,21 +593,23 @@ def train_full(
     logger.info("Training on full dataset")
     logger.info(f"  Full dataset: {len(y_full)} samples, pos={y_full.sum()}")
 
-    # Build checkpoint directory for ChemProp/UniMol with task name and "full" suffix
+    # Build checkpoint directory for ChemProp/UniMol
+    # Note: task_name and fold_name will be added in fit() method to ensure proper separation
     checkpoint_dir = None
     resume_ckpt = None
     if config.model.name in ["chemprop", "unimol"]:
         # Use checkpoint_dir from config if specified, otherwise construct from output_dir
+        # Don't add task_name and fold_name here - let fit() method handle it
         base_checkpoint_dir = config.model.params.get("checkpoint_dir")
         if base_checkpoint_dir:
-            checkpoint_dir = str(Path(base_checkpoint_dir) / actual_task_name / "full")
+            checkpoint_dir = str(Path(base_checkpoint_dir))
         else:
-            checkpoint_dir = str(output_path / "checkpoints" / "full")
-        # Ensure directory exists
+            checkpoint_dir = str(output_path / "checkpoints")
+        # Ensure base directory exists
         Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
 
-        # Check if there's a checkpoint to resume from
-        checkpoint_path = Path(checkpoint_dir)
+        # Check if there's a checkpoint to resume from (in task/full subdirectory)
+        checkpoint_path = Path(checkpoint_dir) / actual_task_name / "full"
         last_ckpt = checkpoint_path / "last.ckpt"
         if last_ckpt.exists():
             resume_ckpt = str(last_ckpt)
@@ -682,7 +689,15 @@ def train_full(
         logger.info(f"  Training with max_epochs={model.params.get('max_epochs', 'default')}")
         logger.info("  Training on full data (no validation set)")
         # ChemProp/UniMol use X_val and y_val instead of eval_set
-        model.fit(X_full, y_full, X_val=None, y_val=None, resume_from_checkpoint=resume_ckpt)
+        model.fit(
+            X_full,
+            y_full,
+            X_val=None,
+            y_val=None,
+            resume_from_checkpoint=resume_ckpt,
+            task_name=actual_task_name,
+            fold_name="full",
+        )
     else:
         # Generic fallback
         logger.info("  Training on full data (no validation set)")
@@ -863,20 +878,22 @@ def train_full_with_split(
     logger.info(f"  Valid: {len(y_valid)} samples, pos={y_valid.sum()}")
 
     # Build checkpoint directory for ChemProp/UniMol
+    # Note: task_name and fold_name will be added in fit() method to ensure proper separation
     checkpoint_dir = None
     resume_ckpt = None
     if config.model.name in ["chemprop", "unimol"]:
         # Use checkpoint_dir from config if specified, otherwise construct from output_dir
+        # Don't add task_name and fold_name here - let fit() method handle it
         base_checkpoint_dir = config.model.params.get("checkpoint_dir")
         if base_checkpoint_dir:
-            checkpoint_dir = str(Path(base_checkpoint_dir) / actual_task_name / "full")
+            checkpoint_dir = str(Path(base_checkpoint_dir))
         else:
-            checkpoint_dir = str(output_path / "checkpoints" / "full")
-        # Ensure directory exists
+            checkpoint_dir = str(output_path / "checkpoints")
+        # Ensure base directory exists
         Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
 
-        # Check if there's a checkpoint to resume from
-        checkpoint_path = Path(checkpoint_dir)
+        # Check if there's a checkpoint to resume from (in task/full subdirectory)
+        checkpoint_path = Path(checkpoint_dir) / actual_task_name / "full"
         last_ckpt = checkpoint_path / "last.ckpt"
         if last_ckpt.exists():
             resume_ckpt = str(last_ckpt)
@@ -908,7 +925,15 @@ def train_full_with_split(
         logger.info(f"  Training with max_epochs={model.params.get('max_epochs', 'default')}")
         logger.info("  Training with validation set for early stopping")
         # ChemProp/UniMol use X_val and y_val instead of eval_set
-        model.fit(X_train, y_train, X_val=X_valid, y_val=y_valid, resume_from_checkpoint=resume_ckpt)
+        model.fit(
+            X_train,
+            y_train,
+            X_val=X_valid,
+            y_val=y_valid,
+            resume_from_checkpoint=resume_ckpt,
+            task_name=actual_task_name,
+            fold_name="full",
+        )
     else:
         # Generic fallback
         logger.info("  Training with validation set for early stopping")

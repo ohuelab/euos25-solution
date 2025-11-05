@@ -1030,6 +1030,8 @@ class UniMolModel(BaseClfModel):
         y_val: Optional[np.ndarray] = None,
         binary_labels_val: Optional[np.ndarray] = None,
         resume_from_checkpoint: Optional[str] = None,
+        task_name: Optional[str] = None,
+        fold_name: Optional[str] = None,
     ) -> "UniMolModel":
         """Train the Uni-Mol-2 model.
 
@@ -1040,6 +1042,8 @@ class UniMolModel(BaseClfModel):
             y_val: Validation labels (optional)
             binary_labels_val: Binary labels for validation set ROC AUC calculation
             resume_from_checkpoint: Path to checkpoint file to resume training from
+            task_name: Task name for organizing checkpoints (e.g., "transmittance340")
+            fold_name: Fold name for organizing checkpoints (e.g., "fold_0", "full")
 
         Returns:
             Self
@@ -1106,17 +1110,29 @@ class UniMolModel(BaseClfModel):
                 collate_fn=self.model.backbone.batch_collate_fn,  # Use model's collate function
             )
 
-        # Setup checkpointing
-        checkpoint_path = Path(self.checkpoint_dir)
-        checkpoint_path.mkdir(parents=True, exist_ok=True)
+        # Setup checkpointing with task and fold separation
+        checkpoint_dir = Path(self.checkpoint_dir)
 
+        # Add task_name and fold_name to checkpoint_dir if provided
+        # This ensures checkpoints are separated by task and fold to avoid conflicts
+        if task_name is not None:
+            checkpoint_dir = checkpoint_dir / task_name
+            if fold_name is not None:
+                checkpoint_dir = checkpoint_dir / fold_name
+
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create filename suffix for checkpoint files
         task_fold_suffix = ""
-        last_part = checkpoint_path.parts[-1] if checkpoint_path.parts else ""
-        if "fold_" in last_part or last_part == "full":
-            task_fold_suffix = f"-{last_part}"
+        if task_name is not None and fold_name is not None:
+            task_fold_suffix = f"-{task_name}-{fold_name}"
+        elif task_name is not None:
+            task_fold_suffix = f"-{task_name}"
+        elif fold_name is not None:
+            task_fold_suffix = f"-{fold_name}"
 
         checkpoint_callback = ModelCheckpoint(
-            dirpath=self.checkpoint_dir,
+            dirpath=str(checkpoint_dir),
             filename=f"best{task_fold_suffix}-{{epoch}}-{{val_loss:.4f}}",
             monitor="val_loss" if val_loader else "train_loss",
             mode="min",
@@ -1193,6 +1209,11 @@ class UniMolModel(BaseClfModel):
 
         if strategy is not None:
             trainer_kwargs["strategy"] = strategy
+            # For DDP, ensure validation data is not distributed across processes
+            # This ensures early stopping works correctly with the same validation set on all GPUs
+            # Training data will be distributed, but validation data will be the same on all processes
+            trainer_kwargs["replace_sampler_ddp"] = False
+            logger.info("Validation data will be used on all GPUs (not distributed) for consistent early stopping")
 
         if self.accelerator == "mps":
             trainer_kwargs["precision"] = "32"

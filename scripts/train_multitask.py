@@ -239,14 +239,15 @@ def train_multitask_fold(
                 return model, metrics
 
     # Build checkpoint directory
+    # Note: task_name and fold_name will be added in fit() method to ensure proper separation
     checkpoint_dir = None
     if config.model.name == "chemprop" and output_dir is not None:
         task_str = "_".join(config.task_names)
         base_checkpoint_dir = config.model.params.get("checkpoint_dir")
         if base_checkpoint_dir:
-            checkpoint_dir = str(Path(base_checkpoint_dir) / task_str / f"fold_{fold_idx}")
+            checkpoint_dir = str(Path(base_checkpoint_dir))
         else:
-            checkpoint_dir = str(output_dir / "checkpoints" / f"fold_{fold_idx}")
+            checkpoint_dir = str(output_dir / "checkpoints")
         Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
 
     # Create model with n_tasks parameter
@@ -272,11 +273,14 @@ def train_multitask_fold(
     model = ChemPropModel(**model_params)
 
     # Train model - pass binary_labels_val if available
+    task_str = "_".join(config.task_names)
     fit_kwargs = {
         "X_train": X_train,
         "y_train": y_train,
         "X_val": X_valid,
         "y_val": y_valid,
+        "task_name": task_str,
+        "fold_name": f"fold_{fold_idx}",
     }
     if binary_labels_valid is not None:
         fit_kwargs["binary_labels_val"] = binary_labels_valid
