@@ -1128,17 +1128,33 @@ class UniMolModel(BaseClfModel):
             and self.early_stopping_rounds > 0
             and val_loader is not None
         ):
+            # Map early_stopping_metric to actual logged metric name
+            # Metrics are logged as val/{metric.__class__.__name__}
+            # Binary classification uses BinaryAUROC, regression/ranking with binary_labels uses BinaryROCAUCMetric
+            if self.early_stopping_metric.lower() == "roc_auc":
+                if self.objective_type in ["regression", "listmle"] and self.binary_labels is not None:
+                    monitor_metric = "val/BinaryROCAUCMetric"
+                else:
+                    monitor_metric = "val/BinaryAUROC"
+            elif self.early_stopping_metric.lower() == "pr_auc":
+                monitor_metric = "val/BinaryAveragePrecision"  # Assuming PR-AUC uses BinaryAveragePrecision
+            else:
+                monitor_metric = "val_loss"
+
             early_stopping_mode = (
                 "max" if self.early_stopping_metric.lower() in ["roc_auc", "pr_auc"] else "min"
             )
-            metric_name = f"val/{self.early_stopping_metric}"
             early_stopping_callback = EarlyStopping(
-                monitor=metric_name,
+                monitor=monitor_metric,
                 patience=self.early_stopping_rounds,
                 mode=early_stopping_mode,
                 verbose=True,
             )
             callbacks.append(early_stopping_callback)
+            logger.info(
+                f"Early stopping enabled: patience={self.early_stopping_rounds}, "
+                f"monitor={monitor_metric}, mode={early_stopping_mode}"
+            )
 
         # Setup trainer
         trainer_kwargs = {
