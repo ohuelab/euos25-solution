@@ -696,3 +696,240 @@ def train_full(
     logger.info("=" * 50)
 
     return model
+
+
+def train_full_with_split(
+    features_path: str,
+    splits_path: str,
+    labels: pd.Series,
+    config: Config,
+    output_dir: str,
+    task_name: Optional[str] = None,
+    feature_group_settings: Optional[dict[str, bool]] = None,
+) -> ClfModel:
+    """Train model on full data using fold 0 split for validation.
+
+    This function trains on all data except fold 0 valid set, using fold 0 valid set
+    for early stopping. The resulting model is saved as the final model.
+
+    Args:
+        features_path: Path to features Parquet
+        splits_path: Path to splits JSON
+        labels: Series with labels (indexed by ID)
+        config: Pipeline configuration
+        output_dir: Directory to save model
+        task_name: Task name override (defaults to config.task)
+        feature_group_settings: Optional feature group settings dict (from Optuna).
+            If provided, overrides config-based feature filtering.
+
+    Returns:
+        Trained model
+    """
+    # Load features and splits
+    features = load_parquet(features_path)
+    splits = load_json(splits_path)
+
+    # Filter features based on feature_group_settings or config
+    if feature_group_settings and len(feature_group_settings) > 0:
+        # Check if at least one group is enabled
+        if any(feature_group_settings.values()):
+            # Use Optuna-optimized feature groups
+            logger.info("Using Optuna-optimized feature groups for full model training")
+            features = filter_feature_groups(features, group_settings=feature_group_settings)
+        else:
+            raise ValueError(
+                f"All Optuna-optimized feature groups are disabled. "
+                f"At least one group must be enabled. Settings: {feature_group_settings}"
+            )
+    else:
+        # Filter features based on config (only use features specified in config)
+        group_settings = get_feature_groups_from_config(config)
+        if group_settings and len(group_settings) > 0:
+            # Check if at least one group is enabled
+            if any(group_settings.values()):
+                features = filter_feature_groups(features, group_settings=group_settings)
+            else:
+                raise ValueError(
+                    f"All feature groups are disabled in config. "
+                    f"At least one group must be enabled. Settings: {group_settings}"
+                )
+
+    # Filter low-quality features
+    features = filter_low_quality_features(
+        features,
+        max_nan_ratio=0.99,
+        min_variance=1e-6,
+        min_unique_ratio=0.01,
+        low_variance_threshold=0.99,
+        feature_groups_to_filter={'mordred', 'rdkit2d'},
+    )
+
+    # Use task_name override if provided, otherwise use config.task
+    actual_task_name = task_name if task_name is not None else config.task
+
+    # Create output directory
+    output_path = Path(output_dir) / actual_task_name / config.model.name
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    # Check if full model already exists
+    full_model_dir = output_path / "full_model"
+    if config.model.name == "lgbm":
+        model_path = full_model_dir / "model.txt"
+        if model_path.exists():
+            logger.info("=" * 50)
+            logger.info("Full model already exists, skipping training")
+            logger.info(f"  Model path: {full_model_dir}")
+            logger.info("=" * 50)
+            from euos25.models.lgbm import LGBMClassifier
+            return LGBMClassifier.load(str(full_model_dir))
+    elif config.model.name == "catboost":
+        model_path = full_model_dir / "model.cbm"
+        if model_path.exists():
+            logger.info("=" * 50)
+            logger.info("Full model already exists, skipping training")
+            logger.info(f"  Model path: {full_model_dir}")
+            logger.info("=" * 50)
+            from euos25.models.catboost import CatBoostClassifier
+            return CatBoostClassifier.load(str(full_model_dir))
+    elif config.model.name == "random_forest":
+        model_path = full_model_dir / "model.pkl"
+        if model_path.exists():
+            logger.info("=" * 50)
+            logger.info("Full model already exists, skipping training")
+            logger.info(f"  Model path: {full_model_dir}")
+            logger.info("=" * 50)
+            from euos25.models.random_forest import RandomForestClassifierModel
+            return RandomForestClassifierModel.load(str(full_model_dir))
+    elif config.model.name == "chemprop":
+        # For ChemProp, check if model exists (can be file or directory)
+        if full_model_dir.exists() and (full_model_dir.is_file() or full_model_dir.is_dir()):
+            logger.info("=" * 50)
+            logger.info("Full model already exists, skipping training")
+            logger.info(f"  Model path: {full_model_dir}")
+            logger.info("=" * 50)
+            from euos25.models.chemprop import ChemPropModel
+            model = ChemPropModel.load_from_checkpoint(
+                str(full_model_dir),
+                **config.model.params,
+                random_seed=config.seed,
+                early_stopping_rounds=config.early_stopping_rounds,
+                early_stopping_metric=config.early_stopping_metric,
+            )
+            return model
+    elif config.model.name == "unimol":
+        # For UniMol, check if model exists (similar to ChemProp)
+        if full_model_dir.exists() and (full_model_dir.is_file() or full_model_dir.is_dir()):
+            logger.info("=" * 50)
+            logger.info("Full model already exists, skipping training")
+            logger.info(f"  Model path: {full_model_dir}")
+            logger.info("=" * 50)
+            # Note: UniMolModel.load_from_checkpoint is not fully implemented yet
+            logger.warning("UniMolModel checkpoint loading not fully implemented. Skipping checkpoint load.")
+
+    # Get fold 0 split for validation
+    fold_0_data = splits.get("fold_0")
+    if fold_0_data is None:
+        raise ValueError("fold_0 not found in splits file")
+
+    # Combine all fold train sets (excluding fold 0 valid)
+    all_train_pos_indices = []
+    fold_0_valid_pos_indices = fold_0_data["valid"]
+
+    for fold_name, fold_data in splits.items():
+        # Add all train indices from all folds
+        all_train_pos_indices.extend(fold_data["train"])
+
+    # Convert positional indices to IDs
+    all_train_ids = features.index[all_train_pos_indices]
+    fold_0_valid_ids = features.index[fold_0_valid_pos_indices]
+
+    # Get features and labels
+    X_train = features.loc[all_train_ids]
+    y_train = labels.loc[all_train_ids].values
+
+    X_valid = features.loc[fold_0_valid_ids]
+    y_valid = labels.loc[fold_0_valid_ids].values
+
+    # Get binary labels if available (for regression/ranking)
+    binary_labels_train = None
+    binary_labels_valid = None
+    if hasattr(config, '_binary_labels') and config._binary_labels is not None:
+        binary_labels_train = config._binary_labels.loc[all_train_ids].values
+        binary_labels_valid = config._binary_labels.loc[fold_0_valid_ids].values
+
+    logger.info("=" * 50)
+    logger.info("Training on full data with fold 0 validation split")
+    logger.info(f"  Train: {len(y_train)} samples, pos={y_train.sum()}")
+    logger.info(f"  Valid: {len(y_valid)} samples, pos={y_valid.sum()}")
+
+    # Build checkpoint directory for ChemProp/UniMol
+    checkpoint_dir = None
+    resume_ckpt = None
+    if config.model.name in ["chemprop", "unimol"]:
+        # Use checkpoint_dir from config if specified, otherwise construct from output_dir
+        base_checkpoint_dir = config.model.params.get("checkpoint_dir")
+        if base_checkpoint_dir:
+            checkpoint_dir = str(Path(base_checkpoint_dir) / actual_task_name / "full")
+        else:
+            checkpoint_dir = str(output_path / "checkpoints" / "full")
+        # Ensure directory exists
+        Path(checkpoint_dir).mkdir(parents=True, exist_ok=True)
+
+        # Check if there's a checkpoint to resume from
+        checkpoint_path = Path(checkpoint_dir)
+        last_ckpt = checkpoint_path / "last.ckpt"
+        if last_ckpt.exists():
+            resume_ckpt = str(last_ckpt)
+            logger.info(f"  Found checkpoint to resume from: {resume_ckpt}")
+        else:
+            # Check for any .ckpt file in the directory
+            ckpt_files = list(checkpoint_path.glob("*.ckpt"))
+            if ckpt_files:
+                # Use the most recent checkpoint
+                resume_ckpt = str(sorted(ckpt_files, key=lambda x: x.stat().st_mtime)[-1])
+                logger.info(f"  Found checkpoint to resume from: {resume_ckpt}")
+
+    # Create model
+    model = create_model(config, checkpoint_dir=checkpoint_dir)
+
+    # Train model with validation set for early stopping
+    if config.model.name == "lgbm":
+        logger.info("  Training with validation set for early stopping")
+        model.fit(X_train, y_train, eval_set=[(X_valid, y_valid)])
+    elif config.model.name == "catboost":
+        logger.info("  Training with validation set for early stopping")
+        model.fit(X_train, y_train, eval_set=[(X_valid, y_valid)])
+    elif config.model.name == "random_forest":
+        # RandomForest doesn't support early stopping, just train on full data
+        logger.info(f"  Training with {model.params['n_estimators']} trees")
+        logger.info("  Note: RandomForest doesn't support early stopping")
+        model.fit(X_train, y_train, eval_set=None)
+    elif config.model.name in ["chemprop", "unimol"]:
+        logger.info(f"  Training with max_epochs={model.params.get('max_epochs', 'default')}")
+        logger.info("  Training with validation set for early stopping")
+        # ChemProp/UniMol use X_val and y_val instead of eval_set
+        model.fit(X_train, y_train, X_val=X_valid, y_val=y_valid, resume_from_checkpoint=resume_ckpt)
+    else:
+        # Generic fallback
+        logger.info("  Training with validation set for early stopping")
+        model.fit(X_train, y_train, eval_set=[(X_valid, y_valid)])
+
+    # Calculate metrics on validation set
+    y_pred = model.predict_proba(X_valid)
+    if isinstance(y_pred, np.ndarray) and y_pred.ndim == 2:
+        y_pred_proba = y_pred[:, 1] if y_pred.shape[1] > 1 else y_pred[:, 0]
+    else:
+        y_pred_proba = y_pred
+
+    metrics = calc_metrics(y_valid, y_pred_proba, metrics=config.metrics)
+    logger.info("Validation metrics:")
+    for metric_name, score in metrics.items():
+        logger.info(f"  {metric_name}: {score:.6f}")
+
+    # Save full model (full_model_dir already defined above)
+    model.save(str(full_model_dir))
+
+    logger.info(f"Saved full model to {full_model_dir}")
+    logger.info("=" * 50)
+
+    return model

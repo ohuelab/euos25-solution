@@ -14,6 +14,7 @@ SUBMISSION_DIR=data/submissions
 TASK="trans_340"  # Default task
 TASK_NAME="y_trans_any"  # Default task name in code
 LABEL_COL="Transmittance"  # Default label column
+FULL_ONLY=false  # Skip CV and train directly on full data
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -46,6 +47,10 @@ while [[ $# -gt 0 ]]; do
       TASK="$2"
       shift 2
       ;;
+    --full-only)
+      FULL_ONLY=true
+      shift
+      ;;
     --help)
       echo "Usage: $0 [OPTIONS]"
       echo ""
@@ -58,6 +63,7 @@ while [[ $# -gt 0 ]]; do
       echo "  --submission-dir DIR Submission output directory (default: data/submissions)"
       echo "  --task TASK          Task name (default: trans_340)"
       echo "                       Available tasks: fluo_340_450, fluo_480, trans_340, trans_450"
+      echo "  --full-only          Skip CV and train directly on full data with fold 0 validation"
       echo "  --help               Show this help message"
       exit 0
       ;;
@@ -112,6 +118,11 @@ if [ "$FORCE" = true ]; then
   echo "Mode: FORCE (will regenerate all outputs)"
 else
   echo "Mode: REUSE (will skip existing outputs)"
+fi
+if [ "$FULL_ONLY" = true ]; then
+  echo "Training: FULL-ONLY (skip CV, train on full data with fold 0 validation)"
+else
+  echo "Training: CROSS-VALIDATION (5-fold CV + full model)"
 fi
 echo "Task: $TASK (task_name: $TASK_NAME)"
 echo "Config: $CONF"
@@ -178,44 +189,80 @@ fi
 echo ""
 echo "Step 5: Training Uni-Mol-2 models for $TASK..."
 
-# Check if at least one model file exists
-MODEL_EXISTS=false
-if [ -d "$MODEL_DIR/$TASK/$TASK_NAME/unimol" ]; then
-  # Check for checkpoint files
-  if [ -n "$(find "$MODEL_DIR/$TASK/$TASK_NAME/unimol" -name '*.ckpt' 2>/dev/null)" ]; then
-    MODEL_EXISTS=true
+if [ "$FULL_ONLY" = true ]; then
+  # Full-only mode: skip CV, train directly on full data with fold 0 validation
+  echo "  Mode: Full-only (skip CV, train on full data with fold 0 validation)"
+
+  # Check if full model exists
+  FULL_MODEL_EXISTS=false
+  if [ -d "$MODEL_DIR/$TASK/$TASK_NAME/unimol/full_model" ]; then
+    # Check for checkpoint files or model files
+    if [ -n "$(find "$MODEL_DIR/$TASK/$TASK_NAME/unimol/full_model" -name '*.ckpt' -o -name 'model.*' 2>/dev/null)" ]; then
+      FULL_MODEL_EXISTS=true
+    fi
+  fi
+
+  if [ "$FORCE" = true ] || [ "$FULL_MODEL_EXISTS" = false ]; then
+    uv run -m euos25.cli train \
+      --features "$FEATURES_TRAIN" \
+      --splits "$SPLIT_FILE" \
+      --config $CONF \
+      --outdir "$MODEL_DIR/$TASK" \
+      --data "$PREPARED_TRAIN" \
+      --label-col "$LABEL_COL" \
+      --task "$TASK_NAME" \
+      --full-only
+  else
+    echo "  Skipping: Full model in $MODEL_DIR/$TASK/$TASK_NAME/unimol/full_model already exists"
+  fi
+else
+  # Standard CV mode
+  echo "  Mode: Cross-validation (5-fold CV + full model)"
+
+  # Check if at least one model file exists
+  MODEL_EXISTS=false
+  if [ -d "$MODEL_DIR/$TASK/$TASK_NAME/unimol" ]; then
+    # Check for checkpoint files
+    if [ -n "$(find "$MODEL_DIR/$TASK/$TASK_NAME/unimol" -name '*.ckpt' 2>/dev/null)" ]; then
+      MODEL_EXISTS=true
+    fi
+  fi
+
+  if [ "$FORCE" = true ] || [ "$MODEL_EXISTS" = false ]; then
+    uv run -m euos25.cli train \
+      --features "$FEATURES_TRAIN" \
+      --splits "$SPLIT_FILE" \
+      --config $CONF \
+      --outdir "$MODEL_DIR/$TASK" \
+      --data "$PREPARED_TRAIN" \
+      --label-col "$LABEL_COL" \
+      --task "$TASK_NAME"
+  else
+    echo "  Skipping: Models in $MODEL_DIR/$TASK/$TASK_NAME/unimol already exist"
   fi
 fi
 
-if [ "$FORCE" = true ] || [ "$MODEL_EXISTS" = false ]; then
-  uv run -m euos25.cli train \
-    --features "$FEATURES_TRAIN" \
-    --splits "$SPLIT_FILE" \
-    --config $CONF \
-    --outdir "$MODEL_DIR/$TASK" \
-    --data "$PREPARED_TRAIN" \
-    --label-col "$LABEL_COL" \
-    --task "$TASK_NAME"
-else
-  echo "  Skipping: Models in $MODEL_DIR/$TASK/$TASK_NAME/unimol already exist"
-fi
+# Step 6: Generate OOF predictions (skip in full-only mode)
+if [ "$FULL_ONLY" = false ]; then
+  echo ""
+  echo "Step 6: Generating OOF predictions for $TASK..."
 
-# Step 6: Generate OOF predictions
-echo ""
-echo "Step 6: Generating OOF predictions for $TASK..."
-
-OOF_OUTPUT="$PRED_DIR/$TASK/${TASK_NAME}_oof.csv"
-if [ "$FORCE" = true ] || [ ! -f "$OOF_OUTPUT" ]; then
-  uv run -m euos25.cli infer \
-    --features "$FEATURES_TRAIN" \
-    --splits "$SPLIT_FILE" \
-    --config $CONF \
-    --model-dir "$MODEL_DIR/$TASK" \
-    --outdir "$PRED_DIR/$TASK" \
-    --mode oof \
-    --task "$TASK_NAME"
+  OOF_OUTPUT="$PRED_DIR/$TASK/${TASK_NAME}_oof.csv"
+  if [ "$FORCE" = true ] || [ ! -f "$OOF_OUTPUT" ]; then
+    uv run -m euos25.cli infer \
+      --features "$FEATURES_TRAIN" \
+      --splits "$SPLIT_FILE" \
+      --config $CONF \
+      --model-dir "$MODEL_DIR/$TASK" \
+      --outdir "$PRED_DIR/$TASK" \
+      --mode oof \
+      --task "$TASK_NAME"
+  else
+    echo "  Skipping: $OOF_OUTPUT already exists"
+  fi
 else
-  echo "  Skipping: $OOF_OUTPUT already exists"
+  echo ""
+  echo "Step 6: Skipping OOF predictions (full-only mode)"
 fi
 
 # Step 7: Build test features

@@ -16,7 +16,7 @@ from euos25.pipeline.optuna_tuning import tune_hyperparameters
 from euos25.pipeline.prepare import prepare_data
 from euos25.pipeline.submit import create_submission, create_final_submission, generate_timestamped_submission
 from euos25.pipeline.features import FEATURE_GROUP_MAPPING
-from euos25.pipeline.train import train_cv, train_full
+from euos25.pipeline.train import train_cv, train_full, train_full_with_split
 from euos25.utils.io import load_csv, load_json, save_json
 from euos25.utils.seed import set_seed
 
@@ -100,7 +100,8 @@ def build_features(input, output, config):
 @click.option("--label-col", default=None, help="Label column name")
 @click.option("--data", default=None, help="Data CSV file with labels")
 @click.option("--task", default=None, help="Task name override (e.g., 'y_fluo_any', 'y_trans_any')")
-def train(features, splits, config, outdir, label_col, data, task):
+@click.option("--full-only", is_flag=True, default=False, help="Skip CV and train directly on full data with fold 0 validation split")
+def train(features, splits, config, outdir, label_col, data, task, full_only):
     """Train models with cross-validation."""
     logger.info("Training models")
 
@@ -209,28 +210,41 @@ def train(features, splits, config, outdir, label_col, data, task):
             else:
                 cfg.model.params[key] = value
 
-    # Train with CV
-    fold_metrics, best_iterations, train_sizes = train_cv(
-        features_path=features,
-        splits_path=splits,
-        labels=labels,
-        config=cfg,
-        output_dir=outdir,
-        task_name=task_name,
-    )
+    # Train with CV or full-only mode
+    if full_only:
+        logger.info("Full-only mode: Training directly on full data with fold 0 validation split")
+        train_full_with_split(
+            features_path=features,
+            splits_path=splits,
+            labels=labels,
+            config=cfg,
+            output_dir=outdir,
+            task_name=task_name,
+            feature_group_settings=feature_group_settings,
+        )
+    else:
+        # Train with CV
+        fold_metrics, best_iterations, train_sizes = train_cv(
+            features_path=features,
+            splits_path=splits,
+            labels=labels,
+            config=cfg,
+            output_dir=outdir,
+            task_name=task_name,
+        )
 
-    # Train on full dataset
-    logger.info("Training on full dataset")
-    train_full(
-        features_path=features,
-        labels=labels,
-        config=cfg,
-        output_dir=outdir,
-        best_iterations=best_iterations,
-        train_sizes=train_sizes,
-        task_name=task_name,
-        feature_group_settings=feature_group_settings,
-    )
+        # Train on full dataset
+        logger.info("Training on full dataset")
+        train_full(
+            features_path=features,
+            labels=labels,
+            config=cfg,
+            output_dir=outdir,
+            best_iterations=best_iterations,
+            train_sizes=train_sizes,
+            task_name=task_name,
+            feature_group_settings=feature_group_settings,
+        )
 
     logger.info("Training completed")
 

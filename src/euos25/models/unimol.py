@@ -709,6 +709,7 @@ class UniMolModel(BaseClfModel):
         checkpoint_dir: Optional[str] = None,
         random_seed: int = 42,
         accelerator: Optional[str] = None,
+        devices: Optional[int] = None,
         early_stopping_rounds: Optional[int] = None,
         early_stopping_metric: str = "roc_auc",
         n_tasks: int = 1,
@@ -721,7 +722,7 @@ class UniMolModel(BaseClfModel):
 
         Args:
             max_epochs: Maximum number of training epochs
-            batch_size: Batch size for training
+            batch_size: Batch size for training (per GPU when using DDP)
             learning_rate: Learning rate
             hidden_size: Hidden dimension size for predictor
             ffn_num_layers: Number of feed-forward network layers
@@ -740,6 +741,8 @@ class UniMolModel(BaseClfModel):
             checkpoint_dir: Directory to save model checkpoints
             random_seed: Random seed for reproducibility
             accelerator: Accelerator to use ('auto', 'cpu', 'cuda', 'mps')
+            devices: Number of GPUs to use. If None, automatically detects from CUDA_VISIBLE_DEVICES.
+                     When using multiple GPUs, DDP (Distributed Data Parallel) will be enabled.
             early_stopping_rounds: Number of epochs to wait before early stopping
             early_stopping_metric: Metric to monitor for early stopping
             n_tasks: Number of tasks for multi-task learning
@@ -781,6 +784,7 @@ class UniMolModel(BaseClfModel):
         self.binary_labels = binary_labels
         self.cache_dir = cache_dir
         self.n_jobs = n_jobs
+        self.devices = devices
 
         # Determine accelerator
         if accelerator is None or accelerator == "auto":
@@ -1156,17 +1160,38 @@ class UniMolModel(BaseClfModel):
                 f"monitor={monitor_metric}, mode={early_stopping_mode}"
             )
 
+        # Determine number of devices
+        if self.devices is not None:
+            # Use explicitly specified number of devices
+            num_devices = self.devices
+        else:
+            # Auto-detect from CUDA_VISIBLE_DEVICES
+            if self.accelerator == "cuda" and torch.cuda.is_available():
+                num_devices = torch.cuda.device_count()
+            else:
+                num_devices = 1
+
+        # Setup strategy for DDP
+        strategy = None
+        if num_devices > 1 and self.accelerator == "cuda":
+            strategy = "ddp"
+            logger.info(f"Using DDP (Distributed Data Parallel) with {num_devices} GPUs")
+            logger.info(f"Effective batch size: {self.batch_size * num_devices} (batch_size={self.batch_size} per GPU)")
+
         # Setup trainer
         trainer_kwargs = {
             "max_epochs": self.max_epochs,
             "accelerator": self.accelerator,
-            "devices": 1,
+            "devices": num_devices,
             "callbacks": callbacks,
             "enable_progress_bar": True,
             "logger": False,
             "num_sanity_val_steps": 0,
             "enable_model_summary": False,
         }
+
+        if strategy is not None:
+            trainer_kwargs["strategy"] = strategy
 
         if self.accelerator == "mps":
             trainer_kwargs["precision"] = "32"
@@ -1404,6 +1429,7 @@ class UniMolModel(BaseClfModel):
             checkpoint_dir=model_params.get("checkpoint_dir", None),
             random_seed=model_params.get("random_seed", 42),
             accelerator=model_params.get("accelerator", None),
+            devices=model_params.get("devices", None),
             early_stopping_rounds=model_params.get("early_stopping_rounds", None),
             early_stopping_metric=model_params.get("early_stopping_metric", "roc_auc"),
             n_tasks=model_params.get("n_tasks", 1),
@@ -1470,6 +1496,7 @@ class UniMolModel(BaseClfModel):
                 "regression_loss_params": self.regression_loss_params,
                 "optimize_3d": self.optimize_3d,
                 "random_seed": self.random_seed,
+                "devices": self.devices,
                 "early_stopping_rounds": self.early_stopping_rounds,
                 "early_stopping_metric": self.early_stopping_metric,
                 "n_tasks": self.n_tasks,
