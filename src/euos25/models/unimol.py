@@ -316,6 +316,42 @@ class UniMolDataset(torch.utils.data.Dataset):
         self.remove_hs = remove_hs
         self.max_atoms = max_atoms
 
+        # Set default save_path if not provided
+        if 'save_path' not in params or params.get('save_path') is None:
+            default_save_path = Path('data/processed/unimol_datahub')
+            default_save_path.mkdir(parents=True, exist_ok=True)
+            params['save_path'] = str(default_save_path)
+            logger.info(f"Using default save_path: {params['save_path']}")
+
+        save_path = Path(params['save_path'])
+        save_path.mkdir(parents=True, exist_ok=True)
+
+        # Generate cache key from SMILES and parameters
+        cache_key_data = {
+            'smiles': tuple(smiles),  # Convert to tuple for hashing
+            'model_name': model_name,
+            'remove_hs': remove_hs,
+            'max_atoms': max_atoms,
+            'task': 'repr',
+            'data_type': params.get('data_type', 'molecule'),
+        }
+        cache_key_str = str(sorted(cache_key_data.items()))
+        cache_key_hash = hashlib.md5(cache_key_str.encode()).hexdigest()
+        cache_file = save_path / f"datahub_cache_{cache_key_hash}.pkl"
+
+        # Try to load datahub from cache
+        if cache_file.exists():
+            logger.info(f"Loading cached DataHub object from {cache_file}")
+            try:
+                with open(cache_file, 'rb') as f:
+                    datahub = pickle.load(f)
+                # Extract processed data from cached datahub
+                self.data = datahub.data['unimol_input']
+                logger.info(f"Successfully loaded cached DataHub for {len(self.data)} molecules")
+                return
+            except Exception as e:
+                logger.warning(f"Failed to load cache from {cache_file}: {e}. Regenerating...")
+
         # Use unimol_tools DataHub to process SMILES
         logger.info(f"Processing {len(smiles)} SMILES strings using unimol_tools...")
 
@@ -336,6 +372,15 @@ class UniMolDataset(torch.utils.data.Dataset):
 
         # Extract processed data
         self.data = datahub.data['unimol_input']
+
+        # Save datahub object to cache
+        try:
+            logger.info(f"Saving DataHub object to cache: {cache_file}")
+            with open(cache_file, 'wb') as f:
+                pickle.dump(datahub, f)
+            logger.info(f"Successfully cached DataHub object for {len(self.data)} molecules")
+        except Exception as e:
+            logger.warning(f"Failed to save cache to {cache_file}: {e}")
 
         logger.info(f"Successfully processed {len(self.data)} molecules")
 
