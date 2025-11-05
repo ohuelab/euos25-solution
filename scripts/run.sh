@@ -12,6 +12,8 @@ MODEL_DIR=data/models/full
 PRED_DIR=data/preds/full
 SUBMISSION_DIR=data/submissions
 TASKS_SPEC="all"
+NO_STANDARDIZE=false  # Don't standardize SMILES (use normalization instead)
+NO_REMOVE_SALTS=false  # Don't remove salts/solvents during standardization
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -44,6 +46,14 @@ while [[ $# -gt 0 ]]; do
       TASKS_SPEC="$2"
       shift 2
       ;;
+    --no-standardize)
+      NO_STANDARDIZE=true
+      shift
+      ;;
+    --no-remove-salts)
+      NO_REMOVE_SALTS=true
+      shift
+      ;;
     --help)
       echo "Usage: $0 [OPTIONS]"
       echo ""
@@ -56,6 +66,8 @@ while [[ $# -gt 0 ]]; do
       echo "  --submission-dir DIR Submission output directory (default: data/submissions)"
       echo "  --tasks TASKS        Comma-separated list of tasks or 'all' (default: all)"
       echo "                       Available tasks: fluo_340_450, fluo_480, trans_340, trans_450"
+      echo "  --no-standardize     Don't standardize SMILES (use normalization instead)"
+      echo "  --no-remove-salts    Don't remove salts/solvents during SMILES standardization"
       echo "  --help               Show this help message"
       exit 0
       ;;
@@ -100,10 +112,10 @@ SPLITS_TRANS_450=$PROCESSED_DIR/splits_trans_450.json
 # Using regular arrays instead of associative arrays for bash 3.2 compatibility
 TASK_KEYS=("fluo_340_450" "fluo_480" "trans_340" "trans_450")
 TASK_VALUES=(
-  "y_fluo_any|Fluorescence|$RAW_TRAIN_FLUO_340_450|$PREPARED_TRAIN_FLUO_340_450|$FEATURES_TRAIN_FLUO_340_450|$SPLITS_FLUO_340_450"
-  "y_fluo_any|Fluorescence|$RAW_TRAIN_FLUO_480|$PREPARED_TRAIN_FLUO_480|$FEATURES_TRAIN_FLUO_480|$SPLITS_FLUO_480"
-  "y_trans_any|Transmittance|$RAW_TRAIN_TRANS_340|$PREPARED_TRAIN_TRANS_340|$FEATURES_TRAIN_TRANS_340|$SPLITS_TRANS_340"
-  "y_trans_any|Transmittance|$RAW_TRAIN_TRANS_450|$PREPARED_TRAIN_TRANS_450|$FEATURES_TRAIN_TRANS_450|$SPLITS_TRANS_450"
+  "y_fluo_340_450|Fluorescence|$RAW_TRAIN_FLUO_340_450|$PREPARED_TRAIN_FLUO_340_450|$FEATURES_TRAIN_FLUO_340_450|$SPLITS_FLUO_340_450"
+  "y_fluo_480|Fluorescence|$RAW_TRAIN_FLUO_480|$PREPARED_TRAIN_FLUO_480|$FEATURES_TRAIN_FLUO_480|$SPLITS_FLUO_480"
+  "y_trans_340|Transmittance|$RAW_TRAIN_TRANS_340|$PREPARED_TRAIN_TRANS_340|$FEATURES_TRAIN_TRANS_340|$SPLITS_TRANS_340"
+  "y_trans_450|Transmittance|$RAW_TRAIN_TRANS_450|$PREPARED_TRAIN_TRANS_450|$FEATURES_TRAIN_TRANS_450|$SPLITS_TRANS_450"
 )
 
 # Helper function to get task info by key
@@ -173,11 +185,20 @@ echo "==================================="
 # Step 1: Prepare test data (shared across all tasks)
 echo ""
 echo "Step 1: Preparing test data..."
+PREPARE_OPTS="--deduplicate"
+if [ "$NO_STANDARDIZE" = true ]; then
+  PREPARE_OPTS="$PREPARE_OPTS --normalize --no-standardize"
+else
+  PREPARE_OPTS="$PREPARE_OPTS --normalize"
+  if [ "$NO_REMOVE_SALTS" = true ]; then
+    PREPARE_OPTS="$PREPARE_OPTS --standardize --no-remove-salts"
+  fi
+fi
 if [ "$FORCE" = true ] || [ ! -f "$PREPARED_TEST" ]; then
   uv run -m euos25.cli prepare \
     --input $RAW_TEST \
     --output $PREPARED_TEST \
-    --normalize --deduplicate
+    $PREPARE_OPTS
 else
   echo "  Skipping: $PREPARED_TEST already exists"
 fi
@@ -204,7 +225,7 @@ for i in "${!TASKS[@]}"; do
     uv run -m euos25.cli prepare \
       --input "$TRAIN_FILE" \
       --output "$PREPARED_FILE" \
-      --normalize --deduplicate
+      $PREPARE_OPTS
   else
     echo "  Skipping: $PREPARED_FILE already exists"
   fi

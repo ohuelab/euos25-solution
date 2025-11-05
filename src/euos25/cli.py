@@ -384,8 +384,10 @@ def submit_final(trans_340, trans_450, fluo_480, fluo_340_450, out):
 @click.option("--input", required=True, help="Input CSV file")
 @click.option("--output", required=True, help="Output prepared CSV file")
 @click.option("--normalize/--no-normalize", default=True, help="Normalize SMILES")
+@click.option("--standardize/--no-standardize", default=True, help="Standardize SMILES (comprehensive datamol standardization, takes precedence over normalize)")
+@click.option("--remove-salts/--no-remove-salts", default=True, help="Remove salts and solvents during standardization (only applies when standardize=True)")
 @click.option("--deduplicate/--no-deduplicate", default=True, help="Remove duplicates")
-def prepare(input, output, normalize, deduplicate):
+def prepare(input, output, normalize, standardize, remove_salts, deduplicate):
     """Prepare and clean data."""
     logger.info("Preparing data")
 
@@ -394,6 +396,8 @@ def prepare(input, output, normalize, deduplicate):
         output_path=output,
         remove_duplicates=deduplicate,
         normalize=normalize,
+        standardize=standardize,
+        remove_salts=remove_salts,
     )
 
     logger.info(f"Saved prepared data to {output}")

@@ -32,12 +32,12 @@ def normalize_smiles(smiles: str) -> Optional[str]:
         return None
 
 
-def standardize_smiles_dm(smiles: str) -> Optional[str]:
+def standardize_smiles_dm(smiles: str, remove_salts: bool = True) -> Optional[str]:
     """Standardize SMILES string using datamol.
 
     This function applies a comprehensive standardization procedure including:
     - Multiple fragment handling (keeps largest fragment if multiple components)
-    - Salt/solvent removal (e.g., .Cl, .HCl, .O=C(O)C(F)(F)F)
+    - Salt/solvent removal (e.g., .Cl, .HCl, .O=C(O)C(F)(F)F) [optional]
     - RDKit molecule sanitization
     - Charge neutralization
     - Tautomer canonicalization
@@ -46,6 +46,7 @@ def standardize_smiles_dm(smiles: str) -> Optional[str]:
     Args:
         smiles: Input SMILES string (may contain salts/solvents like .Cl, .HCl,
                 or larger fragments like .O=C(O)C(F)(F)F)
+        remove_salts: Whether to remove salts and solvents (default: True)
 
     Returns:
         Standardized SMILES or None if invalid
@@ -65,12 +66,15 @@ def standardize_smiles_dm(smiles: str) -> Optional[str]:
             logger.debug(f"Multiple fragments detected, keeping largest fragment ({mol.GetNumAtoms()} atoms)")
 
         # Remove salts and solvents from the selected fragment (e.g., .Cl, .HCl, etc.)
-        mol_no_salt = dm.remove_salts_solvents(mol)
-        if mol_no_salt is None:
-            return None
-
-        # Convert back to SMILES before standardizing
-        smiles_no_salt = Chem.MolToSmiles(mol_no_salt)
+        if remove_salts:
+            mol_no_salt = dm.remove_salts_solvents(mol)
+            if mol_no_salt is None:
+                return None
+            # Convert back to SMILES before standardizing
+            smiles_no_salt = Chem.MolToSmiles(mol_no_salt)
+        else:
+            # Skip salt/solvent removal
+            smiles_no_salt = Chem.MolToSmiles(mol)
 
         # Apply comprehensive standardization
         standardized = dm.standardize_smiles(smiles_no_salt)
@@ -125,6 +129,7 @@ def prepare_data(
     remove_duplicates: bool = True,
     normalize: bool = True,
     standardize: bool = True,
+    remove_salts: bool = True,
 ) -> pd.DataFrame:
     """Prepare training data.
 
@@ -143,6 +148,8 @@ def prepare_data(
         normalize: Whether to normalize SMILES (basic RDKit normalization)
         standardize: Whether to standardize SMILES (comprehensive datamol standardization,
                      takes precedence over normalize if both are True)
+        remove_salts: Whether to remove salts and solvents during standardization
+                     (only applies when standardize=True)
 
     Returns:
         Prepared DataFrame
@@ -161,8 +168,9 @@ def prepare_data(
 
     # Standardize or Normalize SMILES
     if standardize:
-        logger.info("Standardizing SMILES with datamol (includes tautomer canonicalization)")
-        df["SMILES_processed"] = df["SMILES"].apply(standardize_smiles_dm)
+        salt_msg = "with salt/solvent removal" if remove_salts else "without salt/solvent removal"
+        logger.info(f"Standardizing SMILES with datamol ({salt_msg}, includes tautomer canonicalization)")
+        df["SMILES_processed"] = df["SMILES"].apply(lambda x: standardize_smiles_dm(x, remove_salts=remove_salts))
 
         # Remove rows where standardization failed
         before = len(df)

@@ -15,6 +15,8 @@ TASK="trans_340"  # Default task
 TASK_NAME="y_trans_any"  # Default task name in code
 LABEL_COL="Transmittance"  # Default label column
 FULL_ONLY=false  # Skip CV and train directly on full data
+NO_STANDARDIZE=false  # Don't standardize SMILES (use normalization instead)
+NO_REMOVE_SALTS=false  # Don't remove salts/solvents during standardization
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -51,6 +53,14 @@ while [[ $# -gt 0 ]]; do
       FULL_ONLY=true
       shift
       ;;
+    --no-standardize)
+      NO_STANDARDIZE=true
+      shift
+      ;;
+    --no-remove-salts)
+      NO_REMOVE_SALTS=true
+      shift
+      ;;
     --help)
       echo "Usage: $0 [OPTIONS]"
       echo ""
@@ -64,6 +74,8 @@ while [[ $# -gt 0 ]]; do
       echo "  --task TASK          Task name (default: trans_340)"
       echo "                       Available tasks: fluo_340_450, fluo_480, trans_340, trans_450"
       echo "  --full-only          Skip CV and train directly on full data with fold 0 validation"
+      echo "  --no-standardize     Don't standardize SMILES (use normalization instead)"
+      echo "  --no-remove-salts    Don't remove salts/solvents during SMILES standardization"
       echo "  --help               Show this help message"
       exit 0
       ;;
@@ -78,22 +90,22 @@ done
 # Task mapping
 case $TASK in
   fluo_340_450)
-    TASK_NAME="y_fluo_any"
+    TASK_NAME="y_fluo_340_450"
     LABEL_COL="Fluorescence"
     RAW_TRAIN=data/raw/euos25_challenge_train_fluorescence340_450_extended.csv
     ;;
   fluo_480)
-    TASK_NAME="y_fluo_any"
+    TASK_NAME="y_fluo_480"
     LABEL_COL="Fluorescence"
     RAW_TRAIN=data/raw/euos25_challenge_train_fluorescence480_extended.csv
     ;;
   trans_340)
-    TASK_NAME="y_trans_any"
+    TASK_NAME="y_trans_340"
     LABEL_COL="Transmittance"
     RAW_TRAIN=data/raw/euos25_challenge_train_transmittance340_extended.csv
     ;;
   trans_450)
-    TASK_NAME="y_trans_any"
+    TASK_NAME="y_trans_450"
     LABEL_COL="Transmittance"
     RAW_TRAIN=data/raw/euos25_challenge_train_transmittance450_extended.csv
     ;;
@@ -131,11 +143,20 @@ echo "==================================="
 # Step 1: Prepare test data
 echo ""
 echo "Step 1: Preparing test data..."
+PREPARE_OPTS="--deduplicate"
+if [ "$NO_STANDARDIZE" = true ]; then
+  PREPARE_OPTS="$PREPARE_OPTS --normalize --no-standardize"
+else
+  PREPARE_OPTS="$PREPARE_OPTS --normalize"
+  if [ "$NO_REMOVE_SALTS" = true ]; then
+    PREPARE_OPTS="$PREPARE_OPTS --standardize --no-remove-salts"
+  fi
+fi
 if [ "$FORCE" = true ] || [ ! -f "$PREPARED_TEST" ]; then
   uv run -m euos25.cli prepare \
     --input $RAW_TEST \
     --output $PREPARED_TEST \
-    --normalize --deduplicate
+    $PREPARE_OPTS
 else
   echo "  Skipping: $PREPARED_TEST already exists"
 fi
@@ -147,7 +168,7 @@ if [ "$FORCE" = true ] || [ ! -f "$PREPARED_TRAIN" ]; then
   uv run -m euos25.cli prepare \
     --input "$RAW_TRAIN" \
     --output "$PREPARED_TRAIN" \
-    --normalize --deduplicate
+    $PREPARE_OPTS
 else
   echo "  Skipping: $PREPARED_TRAIN already exists"
 fi
