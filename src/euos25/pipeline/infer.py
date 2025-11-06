@@ -12,6 +12,7 @@ from euos25.models.lgbm import LGBMClassifier
 from euos25.models.catboost import CatBoostClassifier
 from euos25.models.random_forest import RandomForestClassifierModel
 from euos25.models import ChemPropModel, CHEMPROP_AVAILABLE
+from euos25.models.unimol import UniMolModel, UNIMOL_AVAILABLE
 from euos25.pipeline.features import (
     filter_feature_groups,
     get_feature_groups_from_config,
@@ -45,6 +46,20 @@ def load_fold_model(model_dir: Path, config: Config):
         # Load ChemProp model from checkpoint
         # model_dir can be a file or directory containing checkpoint
         return ChemPropModel.load_from_checkpoint(
+            str(model_dir),
+            **config.model.params,
+            random_seed=config.seed,
+            early_stopping_rounds=config.early_stopping_rounds,
+            early_stopping_metric=config.early_stopping_metric,
+        )
+    elif config.model.name == "unimol":
+        if not UNIMOL_AVAILABLE:
+            raise ImportError(
+                "UniMol is not available. Please install unimol_tools package."
+            )
+        # Load UniMol model from checkpoint
+        # model_dir can be a file or directory containing checkpoint
+        return UniMolModel.load_from_checkpoint(
             str(model_dir),
             **config.model.params,
             random_seed=config.seed,
@@ -137,8 +152,10 @@ def predict_oof(
         # Predict
         preds = model.predict_proba(X_valid)
 
-        # Handle different output shapes: chemprop returns (n_samples, 2), lgbm returns (n_samples,)
-        if config.model.name == "chemprop" and preds.ndim == 2:
+        # Handle different output shapes:
+        # - chemprop/unimol return (n_samples, 2) for single task, extract positive class probabilities
+        # - lgbm returns (n_samples,)
+        if config.model.name in ["chemprop", "unimol"] and preds.ndim == 2:
             # Extract positive class probabilities
             preds = preds[:, 1]
 
@@ -231,8 +248,10 @@ def predict_test(
         model = load_fold_model(full_model_path, config)
         predictions = model.predict_proba(features)
 
-        # Handle different output shapes: chemprop returns (n_samples, 2), lgbm returns (n_samples,)
-        if config.model.name == "chemprop" and predictions.ndim == 2:
+        # Handle different output shapes:
+        # - chemprop/unimol return (n_samples, 2) for single task, extract positive class probabilities
+        # - lgbm returns (n_samples,)
+        if config.model.name in ["chemprop", "unimol"] and predictions.ndim == 2:
             # Extract positive class probabilities
             predictions = predictions[:, 1]
 
@@ -262,8 +281,10 @@ def predict_test(
             # Predict
             preds = model.predict_proba(features)
 
-            # Handle different output shapes: chemprop returns (n_samples, 2), lgbm returns (n_samples,)
-            if config.model.name == "chemprop" and preds.ndim == 2:
+            # Handle different output shapes:
+            # - chemprop/unimol return (n_samples, 2) for single task, extract positive class probabilities
+            # - lgbm returns (n_samples,)
+            if config.model.name in ["chemprop", "unimol"] and preds.ndim == 2:
                 # Extract positive class probabilities
                 preds = preds[:, 1]
 
