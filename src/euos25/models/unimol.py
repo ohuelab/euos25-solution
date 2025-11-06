@@ -1297,6 +1297,12 @@ class UniMolModel(BaseClfModel):
         self.model.eval()
         predictions = self.trainer.predict(self.model, test_loader)
 
+        # Handle distributed predictions: in DDP mode, predictions is a list of lists (one per device)
+        # Flatten if needed
+        if predictions and isinstance(predictions[0], list):
+            # Distributed mode: flatten the list of lists
+            predictions = [pred for device_preds in predictions for pred in device_preds]
+
         # Convert to numpy array
         probs = torch.cat(predictions)
 
