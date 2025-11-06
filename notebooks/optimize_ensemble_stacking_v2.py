@@ -26,6 +26,8 @@ import sys
 import yaml
 from rdkit import Chem
 from rdkit.Chem import AllChem, DataStructs
+from tqdm import tqdm
+from multiprocessing import Pool, cpu_count
 
 # Import LGBMClassifier from the project
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -122,7 +124,7 @@ def load_cv_scores(
     cv_scores = {}
 
     # Load single-task model scores
-    for model_name in available_single:
+    for model_name in tqdm(available_single, desc="  Loading single-task CV scores", leave=False):
         model_dir = models_base_dir / model_name / task_key / task_name
         if not model_dir.exists():
             continue
@@ -143,7 +145,7 @@ def load_cv_scores(
                     continue
 
     # Load multitask model scores
-    for model_name in available_multitask:
+    for model_name in tqdm(available_multitask, desc="  Loading multitask CV scores", leave=False):
         model_dir = models_base_dir / model_name
         if not model_dir.exists():
             continue
@@ -329,10 +331,8 @@ def find_available_models(task_key: str, task_name: str, mt_task_name: str) -> T
         return available_single, available_multitask, file_paths
 
     # Check all directories in preds folder
-    for model_dir in sorted(pred_base_dir.iterdir()):
-        if not model_dir.is_dir():
-            continue
-
+    model_dirs = [d for d in sorted(pred_base_dir.iterdir()) if d.is_dir()]
+    for model_dir in tqdm(model_dirs, desc="  Scanning for available models", leave=False):
         model_name = model_dir.name
 
         # Skip special directories
@@ -379,7 +379,7 @@ def load_predictions(file_paths: Dict[str, Dict[str, Path]], available_single: L
     predictions = {}
 
     # Load single-task predictions
-    for model_name in available_single:
+    for model_name in tqdm(available_single, desc="  Loading single-task predictions", leave=False):
         oof_path = file_paths[model_name]['oof']
         try:
             # Try reading with index_col=0 first (if mol_id is index)
@@ -401,7 +401,7 @@ def load_predictions(file_paths: Dict[str, Dict[str, Path]], available_single: L
             continue
 
     # Load multitask predictions
-    for model_name in available_multitask:
+    for model_name in tqdm(available_multitask, desc="  Loading multitask predictions", leave=False):
         oof_path = file_paths[model_name]['oof']
         try:
             df = pd.read_csv(oof_path)
@@ -561,13 +561,50 @@ def load_molecular_features(task_key: str, prepared_file: str, feature_dir: str,
         return None
 
 
+def _compute_similarities_worker(args: Tuple[List[str], List, int, int]) -> List[float]:
+    """Worker function for parallel similarity computation.
+
+    Args:
+        args: Tuple of (query_smiles_list, valid_train_fps, radius, n_bits)
+
+    Returns:
+        List of max similarities for each query SMILES
+    """
+    query_smiles_list, valid_train_fps, radius, n_bits = args
+    similarities = []
+
+    for smiles in query_smiles_list:
+        try:
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is None:
+                similarities.append(0.0)
+                continue
+
+            query_fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius=radius, nBits=n_bits)
+
+            # Compute Tanimoto similarity to all training samples using bulk operation
+            sims = DataStructs.BulkTanimotoSimilarity(query_fp, valid_train_fps)
+
+            if len(sims) > 0:
+                # Use max similarity
+                similarities.append(np.max(sims))
+            else:
+                similarities.append(0.0)
+        except Exception:
+            similarities.append(0.0)
+
+    return similarities
+
+
 def compute_sim_to_train_mean(
     query_ids: List[str],
     train_ids: List[str],
     df_train: pd.DataFrame,
     smiles_col: str = 'SMILES',
     radius: int = 3,
-    n_bits: int = 2048
+    n_bits: int = 2048,
+    n_jobs: Optional[int] = None,
+    train_fps_cache: Optional[Dict[Tuple[str, ...], List]] = None
 ) -> np.ndarray:
     """Compute max/mean Tanimoto similarity to training data using ECFP.
 
@@ -581,6 +618,9 @@ def compute_sim_to_train_mean(
         smiles_col: Name of SMILES column
         radius: ECFP radius
         n_bits: Number of bits in fingerprint
+        n_jobs: Number of parallel jobs. If None, uses cpu_count()
+        train_fps_cache: Optional cache dictionary for training fingerprints.
+                        Key is tuple of sorted train_ids, value is list of fingerprints.
 
     Returns:
         Array of max similarities (one per query sample)
@@ -595,44 +635,62 @@ def compute_sim_to_train_mean(
     if len(query_smiles) == 0 or len(train_smiles) == 0:
         return np.zeros(len(query_ids))
 
-    # Compute fingerprints for training set
-    train_fps = []
-    for smiles in train_smiles:
-        try:
-            mol = Chem.MolFromSmiles(smiles)
-            if mol is not None:
-                fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius=radius, nBits=n_bits)
-                train_fps.append(fp)
-            else:
+    # Check cache for training fingerprints
+    train_ids_key = tuple(sorted(train_ids))
+    if train_fps_cache is not None and train_ids_key in train_fps_cache:
+        valid_train_fps = train_fps_cache[train_ids_key]
+        print(f"    Using cached fingerprints for {len(train_ids)} training samples")
+    else:
+        # Compute fingerprints for training set
+        train_fps = []
+        for smiles in tqdm(train_smiles, desc="  Computing train fingerprints", leave=False):
+            try:
+                mol = Chem.MolFromSmiles(smiles)
+                if mol is not None:
+                    fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius=radius, nBits=n_bits)
+                    train_fps.append(fp)
+                else:
+                    train_fps.append(None)
+            except Exception:
                 train_fps.append(None)
-        except Exception:
-            train_fps.append(None)
 
-    # Compute similarities for query set
+        # Filter out None fingerprints
+        valid_train_fps = [fp for fp in train_fps if fp is not None]
+
+        # Cache the fingerprints
+        if train_fps_cache is not None:
+            train_fps_cache[train_ids_key] = valid_train_fps
+
+    if len(valid_train_fps) == 0:
+        return np.zeros(len(query_ids))
+
+    # Compute similarities for query set using multiprocessing
+    if n_jobs is None:
+        n_jobs = max(1, cpu_count() - 1)
+
+    # Split query_smiles into chunks for parallel processing
+    chunk_size = max(1, len(query_smiles) // n_jobs)
+    query_smiles_chunks = [
+        query_smiles[i:i + chunk_size]
+        for i in range(0, len(query_smiles), chunk_size)
+    ]
+
+    # Prepare arguments for workers
+    worker_args = [
+        (chunk, valid_train_fps, radius, n_bits)
+        for chunk in query_smiles_chunks
+    ]
+
+    # Process in parallel
+    print(f"    Computing similarities using {n_jobs} processes ({len(query_smiles)} queries, {len(valid_train_fps)} train samples)...")
     similarities = []
-    for smiles in query_smiles:
-        try:
-            mol = Chem.MolFromSmiles(smiles)
-            if mol is None:
-                similarities.append(0.0)
-                continue
-
-            query_fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius=radius, nBits=n_bits)
-
-            # Compute Tanimoto similarity to all training samples
-            sims = []
-            for train_fp in train_fps:
-                if train_fp is not None:
-                    sim = DataStructs.TanimotoSimilarity(query_fp, train_fp)
-                    sims.append(sim)
-
-            if len(sims) > 0:
-                # Use max similarity
-                similarities.append(np.max(sims))
-            else:
-                similarities.append(0.0)
-        except Exception:
-            similarities.append(0.0)
+    with Pool(processes=n_jobs) as pool:
+        results = list(tqdm(pool.imap(_compute_similarities_worker, worker_args),
+                           total=len(worker_args),
+                           desc="    Processing chunks",
+                           leave=False))
+        for result in results:
+            similarities.extend(result)
 
     return np.array(similarities)
 
@@ -731,7 +789,8 @@ def build_level1_data(
     model_names: List[str],
     config: Dict[str, Any],
     df_train: Optional[pd.DataFrame] = None,
-    features_df: Optional[pd.DataFrame] = None
+    features_df: Optional[pd.DataFrame] = None,
+    train_fps_cache: Optional[Dict[Tuple[str, ...], List]] = None
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str]]:
     """Build level-1 training and validation data for stacking.
 
@@ -807,8 +866,8 @@ def build_level1_data(
 
         for feat_name in derived_features:
             if feat_name == 'sim_to_train_mean':
-                train_sim = compute_sim_to_train_mean(train_common_ids, train_common_ids, df_train)
-                valid_sim = compute_sim_to_train_mean(valid_common_ids, train_common_ids, df_train)
+                train_sim = compute_sim_to_train_mean(train_common_ids, train_common_ids, df_train, train_fps_cache=train_fps_cache)
+                valid_sim = compute_sim_to_train_mean(valid_common_ids, train_common_ids, df_train, train_fps_cache=train_fps_cache)
                 X_train_level1_list.append(train_sim.reshape(-1, 1))
                 X_valid_level1_list.append(valid_sim.reshape(-1, 1))
                 print(f"    Added sim_to_train_mean feature")
@@ -1024,7 +1083,8 @@ def train_meta_learner_for_fold(
     output_dir: Path,
     df_train: Optional[pd.DataFrame] = None,
     features_df: Optional[pd.DataFrame] = None,
-    n_trials: int = 50
+    n_trials: int = 50,
+    train_fps_cache: Optional[Dict[Tuple[str, ...], List]] = None
 ) -> Tuple[Any, str, Dict[str, Any], float, List[str], Optional[np.ndarray]]:
     """Train meta-learner for a single fold using Optuna optimization.
 
@@ -1055,7 +1115,8 @@ def train_meta_learner_for_fold(
         model_names=model_names,
         config=config,
         df_train=df_train,
-        features_df=features_df
+        features_df=features_df,
+        train_fps_cache=train_fps_cache
     )
 
     if len(valid_ids) == 0 or X_train_level1.shape[0] == 0:
@@ -1072,18 +1133,23 @@ def train_meta_learner_for_fold(
     )
 
     # Optimize
-    study.optimize(
-        lambda trial: objective_meta_learner(
-            trial=trial,
-            X_train=X_train_level1,
-            y_train=y_train_level1,
-            X_valid=X_valid_level1,
-            y_valid=y_valid_level1,
-            model_names=model_names
-        ),
-        n_trials=n_trials - len(study.trials),
-        show_progress_bar=False
-    )
+    remaining_trials = n_trials - len(study.trials)
+    if remaining_trials > 0:
+        print(f"    Running {remaining_trials} Optuna trials...")
+        study.optimize(
+            lambda trial: objective_meta_learner(
+                trial=trial,
+                X_train=X_train_level1,
+                y_train=y_train_level1,
+                X_valid=X_valid_level1,
+                y_valid=y_valid_level1,
+                model_names=model_names
+            ),
+            n_trials=remaining_trials,
+            show_progress_bar=True
+        )
+    else:
+        print(f"    Using existing study with {len(study.trials)} trials")
 
     # Get best result
     best_trial = study.best_trial
@@ -1245,6 +1311,9 @@ def optimize_stacking_for_task(
     id_to_idx = {id_val: idx for idx, id_val in enumerate(df_train['ID'].values)}
     idx_to_id = {idx: id_val for idx, id_val in enumerate(df_train['ID'].values)}
 
+    # Initialize fingerprint cache for similarity computation (shared across folds)
+    train_fps_cache: Dict[Tuple[str, ...], List] = {}
+
     # Step 7: Train meta-learner for each fold
     n_trials = config.get('n_trials', DEFAULT_N_TRIALS)
     print(f"\n🚀 Starting nested CV stacking optimization with {n_trials} trials per fold...")
@@ -1255,10 +1324,10 @@ def optimize_stacking_for_task(
     fold_valid_ids = []
     fold_predictions = {}  # Store OOF predictions from training time
 
-    for fold_name, fold_data in sorted(splits.items()):
+    for fold_name, fold_data in tqdm(sorted(splits.items()), desc="Processing folds", total=len(splits)):
         fold_idx = int(fold_name.split("_")[1])
 
-        print(f"\n  Fold {fold_idx}: Optimizing meta-learner...")
+        print(f"\n  Fold {fold_idx}/{n_folds}: Optimizing meta-learner...")
 
         # Train meta-learner for this fold
         best_model, best_model_type, best_params, fold_auc, valid_ids, fold_pred = train_meta_learner_for_fold(
@@ -1273,7 +1342,8 @@ def optimize_stacking_for_task(
             output_dir=output_dir,
             df_train=df_train,
             features_df=features_df,
-            n_trials=n_trials
+            n_trials=n_trials,
+            train_fps_cache=train_fps_cache
         )
 
         fold_models.append(best_model)
@@ -1353,6 +1423,7 @@ def optimize_stacking_for_task(
     }
 
     # Save to JSON
+    output_dir = Path(output_dir)
     result_path = output_dir / f"ensemble_optimization_stacking_{task_key}.json"
     with open(result_path, 'w') as f:
         json.dump(result, f, indent=2)
@@ -1413,7 +1484,7 @@ def load_test_predictions(task_key: str, task_name: str, mt_task_name: str, mode
     """
     test_predictions = {}
 
-    for model_name in model_names:
+    for model_name in tqdm(model_names, desc="  Loading test predictions", leave=False):
         # Extract actual model name
         if model_name.startswith("single_"):
             actual_model_name = model_name.replace("single_", "")
@@ -1494,7 +1565,7 @@ def generate_test_predictions_from_cv_models(
 
     # Calculate simple average
     ensemble_pred = np.zeros(len(common_ids))
-    for model_name in model_names:
+    for model_name in tqdm(model_names, desc="  Averaging predictions", leave=False):
         if model_name in test_predictions:
             ensemble_pred += test_predictions[model_name].loc[common_ids].values
     ensemble_pred /= len([m for m in model_names if m in test_predictions])
@@ -1521,7 +1592,8 @@ def generate_test_predictions_from_stacking(
     idx_to_id: Dict[int, str],
     config: Dict[str, Any],
     df_train: Optional[pd.DataFrame] = None,
-    features_df: Optional[pd.DataFrame] = None
+    features_df: Optional[pd.DataFrame] = None,
+    train_fps_cache: Optional[Dict[Tuple[str, ...], List]] = None
 ) -> pd.DataFrame:
     """Generate test predictions using stacking ensemble (CV meta-learners).
 
@@ -1583,7 +1655,7 @@ def generate_test_predictions_from_stacking(
 
         for feat_name in derived_features:
             if feat_name == 'sim_to_train_mean':
-                test_sim = compute_sim_to_train_mean(common_ids, all_train_ids, df_train)
+                test_sim = compute_sim_to_train_mean(common_ids, all_train_ids, df_train, train_fps_cache=train_fps_cache)
                 X_test_level1_list.append(test_sim.reshape(-1, 1))
                 print(f"    Added sim_to_train_mean feature")
 
@@ -1604,7 +1676,7 @@ def generate_test_predictions_from_stacking(
 
     # Average predictions from all fold-specific meta-learners
     test_preds = []
-    for model, model_type in zip(fold_models, fold_model_types):
+    for model, model_type in tqdm(zip(fold_models, fold_model_types), desc="  Generating predictions from fold models", total=len(fold_models), leave=False):
         if model is None:
             continue
         pred = predict_proba_meta_model(model, X_test_level1, model_type)
@@ -1623,6 +1695,128 @@ def generate_test_predictions_from_stacking(
         'ID': common_ids,
         'prediction': ensemble_pred
     })
+
+
+def create_final_submission_from_stacking_v2(output_dir: Path, use_cv_avg: bool = True):
+    """Create final submission file from stacking ensemble results.
+
+    Args:
+        output_dir: Output directory containing test predictions
+        use_cv_avg: If True, use CV average predictions; if False, use stacking predictions
+    """
+    print("\n" + "="*70)
+    print("Creating Final Submission from Stacking Ensembles v2")
+    print("="*70)
+
+    # Task mapping: task_key -> (display_name, prediction_file_suffix)
+    task_mapping = {
+        'trans_340': ('Transmittance(340)', 'trans_340'),
+        'trans_450': ('Transmittance(450)', 'trans_450'),
+        'fluo_340_450': ('Fluorescence(340/480)', 'fluo_340_450'),
+        'fluo_480': ('Fluorescence(multiple)', 'fluo_480'),
+    }
+
+    # Load test predictions for all tasks
+    task_predictions = {}
+    task_results = {}
+
+    for task_key, task_name, label_col, prepared_file, mt_task_name in tasks:
+        # Load optimization results
+        result_path = output_dir / f"ensemble_optimization_stacking_{task_key}.json"
+        if result_path.exists():
+            with open(result_path, 'r') as f:
+                task_results[task_key] = json.load(f)
+
+        # Load test predictions
+        if use_cv_avg:
+            test_pred_path = output_dir / f"ensemble_test_cv_avg_{task_key}.csv"
+        else:
+            test_pred_path = output_dir / f"ensemble_test_stacking_{task_key}.csv"
+
+        if not test_pred_path.exists():
+            print(f"⚠️  Test predictions not found for {task_key}: {test_pred_path}")
+            continue
+
+        try:
+            test_pred_df = pd.read_csv(test_pred_path)
+            if 'ID' not in test_pred_df.columns or 'prediction' not in test_pred_df.columns:
+                print(f"⚠️  Invalid format in {test_pred_path}")
+                continue
+            task_predictions[task_key] = test_pred_df
+            print(f"✅ Loaded test predictions for {task_key}: {len(test_pred_df)} samples")
+        except Exception as e:
+            print(f"⚠️  Error loading test predictions for {task_key}: {e}")
+            continue
+
+    # Check if we have all 4 tasks
+    required_tasks = ['trans_340', 'trans_450', 'fluo_340_450', 'fluo_480']
+    missing_tasks = [t for t in required_tasks if t not in task_predictions]
+
+    if missing_tasks:
+        print(f"\n⚠️  Missing tasks: {missing_tasks}")
+        print("Cannot create final submission without all 4 tasks.")
+        return None
+
+    # Create final submission
+    print("\n" + "="*70)
+    print("Creating final submission...")
+
+    # Align all DataFrames by ID
+    all_ids = set(task_predictions['trans_340']['ID'])
+    for task_key in required_tasks:
+        all_ids &= set(task_predictions[task_key]['ID'])
+
+    all_ids = sorted(all_ids)
+    print(f"Common IDs: {len(all_ids)} samples")
+
+    # Create final submission DataFrame
+    final_submission = pd.DataFrame({
+        "Transmittance(340)": task_predictions['trans_340'].set_index('ID').loc[all_ids, 'prediction'].values,
+        "Transmittance(450)": task_predictions['trans_450'].set_index('ID').loc[all_ids, 'prediction'].values,
+        "Fluorescence(340/480)": task_predictions['fluo_340_450'].set_index('ID').loc[all_ids, 'prediction'].values,
+        "Fluorescence(multiple)": task_predictions['fluo_480'].set_index('ID').loc[all_ids, 'prediction'].values,
+    })
+
+    # Clip to [0, 1] (should already be done, but just in case)
+    final_submission = final_submission.clip(0, 1)
+
+    # Save final submission
+    suffix = "cv_avg" if use_cv_avg else "stacking"
+    final_submission_path = output_dir / f"ensemble_final_submission_{suffix}.csv"
+    final_submission.to_csv(final_submission_path, index=False)
+
+    print(f"\n✅ Final submission saved to {final_submission_path}")
+    print(f"Shape: {final_submission.shape}")
+
+    # Print statistics
+    print("\nSubmission Statistics:")
+    print("="*70)
+    for col in final_submission.columns:
+        print(f"  {col:30s}: "
+              f"min={final_submission[col].min():.6f}, "
+              f"max={final_submission[col].max():.6f}, "
+              f"mean={final_submission[col].mean():.6f}")
+
+    # Print final performance metrics (OOF AUC) if available
+    if task_results:
+        print("\nFinal Performance (OOF AUC):")
+        print("="*70)
+        for task_key in required_tasks:
+            if task_key in task_results:
+                result = task_results[task_key]
+                final_auc = result.get('final_oof_auc', 0.0)
+                mean_fold_auc = result.get('mean_fold_auc', 0.0)
+                std_fold_auc = result.get('std_fold_auc', 0.0)
+                cv_avg_auc = result.get('cv_avg_auc', 0.0)
+                n_models = result.get('n_models', 0)
+                task_display_name = task_mapping.get(task_key, (task_key, task_key))[0]
+                print(f"  {task_display_name:25s}: "
+                      f"Final OOF AUC = {final_auc:.6f}, "
+                      f"Mean CV AUC = {mean_fold_auc:.6f} ± {std_fold_auc:.6f}, "
+                      f"CV Avg AUC = {cv_avg_auc:.6f}, "
+                      f"Models = {n_models}")
+
+    return final_submission
 
 
 def main(config_path: Optional[str] = None, output_dir: Optional[str] = None):
@@ -1658,7 +1852,7 @@ def main(config_path: Optional[str] = None, output_dir: Optional[str] = None):
 
     all_results = []
 
-    for task_key, task_name, label_col, prepared_file, mt_task_name in tasks:
+    for task_key, task_name, label_col, prepared_file, mt_task_name in tqdm(tasks, desc="Processing tasks"):
         try:
             result = optimize_stacking_for_task(
                 task_key=task_key,
@@ -1678,7 +1872,7 @@ def main(config_path: Optional[str] = None, output_dir: Optional[str] = None):
             print(f"{'='*70}")
 
             # Load results to get fold models info
-            result_path = output_dir / f"ensemble_optimization_stacking_{task_key}.json"
+            result_path = output_dir_path / f"ensemble_optimization_stacking_{task_key}.json"
             if result_path.exists():
                 with open(result_path, 'r') as f:
                     result_data = json.load(f)
@@ -1706,7 +1900,7 @@ def main(config_path: Optional[str] = None, output_dir: Optional[str] = None):
                         model_names=selected_models,
                         file_paths=file_paths
                     )
-                    cv_avg_test_path = output_dir / f"ensemble_test_cv_avg_{task_key}.csv"
+                    cv_avg_test_path = output_dir_path / f"ensemble_test_cv_avg_{task_key}.csv"
                     cv_avg_test_df.to_csv(cv_avg_test_path, index=False)
                     print(f"✅ CV average test predictions saved to {cv_avg_test_path}")
                 except Exception as e:
@@ -1742,20 +1936,33 @@ def main(config_path: Optional[str] = None, output_dir: Optional[str] = None):
         print(summary_df.to_string(index=False))
 
         # Save summary
-        summary_path = output_dir / "ensemble_optimization_stacking_summary.csv"
+        summary_path = output_dir_path / "ensemble_optimization_stacking_summary.csv"
         summary_df.to_csv(summary_path, index=False)
         print(f"\nSummary saved to {summary_path}")
 
         # Save all results
-        all_results_path = output_dir / "ensemble_optimization_stacking_all.json"
+        all_results_path = output_dir_path / "ensemble_optimization_stacking_all.json"
         with open(all_results_path, 'w') as f:
             json.dump(all_results, f, indent=2)
         print(f"All results saved to {all_results_path}")
+
+    # Create final submission file
+    print("\n" + "="*70)
+    print("Creating Final Submission File")
+    print("="*70)
+    try:
+        create_final_submission_from_stacking_v2(output_dir_path, use_cv_avg=True)
+    except Exception as e:
+        print(f"\n⚠️  Error creating final submission: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 if __name__ == "__main__":
     config_path = None
     output_dir = None
+    create_submission_only = False
+    use_cv_avg = True
 
     i = 1
     while i < len(sys.argv):
@@ -1765,13 +1972,40 @@ if __name__ == "__main__":
         elif sys.argv[i] == "--output-dir" and i + 1 < len(sys.argv):
             output_dir = sys.argv[i + 1]
             i += 2
+        elif sys.argv[i] == "--create-submission":
+            create_submission_only = True
+            i += 1
+        elif sys.argv[i] == "--use-stacking":
+            use_cv_avg = False
+            i += 1
         elif sys.argv[i] == "--help":
-            print("Usage: python optimize_ensemble_stacking_v2.py [--config CONFIG_PATH] [--output-dir OUTPUT_DIR]")
+            print("Usage: python optimize_ensemble_stacking_v2.py [OPTIONS]")
+            print("Options:")
             print("  --config CONFIG_PATH     Path to YAML config file")
             print("  --output-dir OUTPUT_DIR  Output directory (default: data/ensembles_stacking_v2)")
+            print("  --create-submission      Only create submission file from existing predictions")
+            print("  --use-stacking           Use stacking predictions instead of CV average (default: CV average)")
+            print("  --help                   Show this help message")
             sys.exit(0)
         else:
             i += 1
 
-    main(config_path=config_path, output_dir=output_dir)
+    if create_submission_only:
+        # Only create submission from existing predictions
+        if output_dir is None:
+            output_dir_path = DEFAULT_OUTPUT_DIR
+        else:
+            output_dir_path = Path(output_dir)
+
+        if not output_dir_path.exists():
+            print(f"❌ Output directory does not exist: {output_dir_path}")
+            sys.exit(1)
+
+        print("="*70)
+        print("Creating Submission File from Existing Predictions")
+        print("="*70)
+        create_final_submission_from_stacking_v2(output_dir_path, use_cv_avg=use_cv_avg)
+    else:
+        # Run full optimization and then create submission
+        main(config_path=config_path, output_dir=output_dir)
 
