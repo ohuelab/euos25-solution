@@ -63,6 +63,16 @@ DEFAULT_MAX_DIVERSE_MODELS = 15
 DEFAULT_N_TRIALS = 50
 DEFAULT_CLUSTER_N_CLUSTERS = 50
 
+# Default LGBM parameters for meta-learner (when not using Optuna)
+DEFAULT_LGBM_PARAMS = {
+    'n_estimators': 200,
+    'learning_rate': 0.05,
+    'num_leaves': 31,
+    'max_depth': 5,
+    'min_child_samples': 20,
+    'early_stopping_rounds': None,
+}
+
 # Default config (can be overridden by YAML)
 DEFAULT_CONFIG = {
     'use_additional_features': False,
@@ -75,6 +85,7 @@ DEFAULT_CONFIG = {
     'max_diverse_models': DEFAULT_MAX_DIVERSE_MODELS,
     'n_trials': DEFAULT_N_TRIALS,
     'cluster_n_clusters': DEFAULT_CLUSTER_N_CLUSTERS,
+    'use_optuna': False,  # Default: use default LGBM without optimization
 }
 
 
@@ -561,33 +572,31 @@ def load_molecular_features(task_key: str, prepared_file: str, feature_dir: str,
         return None
 
 
-def _compute_similarities_worker(args: Tuple[List[str], List, int, int]) -> List[float]:
+def _compute_similarities_worker(args: Tuple[List, List, int, int]) -> List[float]:
     """Worker function for parallel similarity computation.
 
     Args:
-        args: Tuple of (query_smiles_list, valid_train_fps, radius, n_bits)
+        args: Tuple of (query_fps_list, valid_train_fps, radius, n_bits)
+              query_fps_list contains pre-computed fingerprints (or None for invalid)
 
     Returns:
-        List of max similarities for each query SMILES
+        List of mean similarities for each query fingerprint
     """
-    query_smiles_list, valid_train_fps, radius, n_bits = args
+    query_fps_list, valid_train_fps, radius, n_bits = args
     similarities = []
 
-    for smiles in query_smiles_list:
+    for query_fp in query_fps_list:
+        if query_fp is None:
+            similarities.append(0.0)
+            continue
+
         try:
-            mol = Chem.MolFromSmiles(smiles)
-            if mol is None:
-                similarities.append(0.0)
-                continue
-
-            query_fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius=radius, nBits=n_bits)
-
             # Compute Tanimoto similarity to all training samples using bulk operation
             sims = DataStructs.BulkTanimotoSimilarity(query_fp, valid_train_fps)
 
             if len(sims) > 0:
-                # Use max similarity
-                similarities.append(np.max(sims))
+                # Use Mean similarity
+                similarities.append(np.mean(sims))
             else:
                 similarities.append(0.0)
         except Exception:
@@ -604,7 +613,8 @@ def compute_sim_to_train_mean(
     radius: int = 3,
     n_bits: int = 2048,
     n_jobs: Optional[int] = None,
-    train_fps_cache: Optional[Dict[Tuple[str, ...], List]] = None
+    train_fps_cache: Optional[Dict[Tuple[str, ...], List]] = None,
+    query_fps_cache: Optional[Dict[str, Any]] = None
 ) -> np.ndarray:
     """Compute max/mean Tanimoto similarity to training data using ECFP.
 
@@ -621,6 +631,8 @@ def compute_sim_to_train_mean(
         n_jobs: Number of parallel jobs. If None, uses cpu_count()
         train_fps_cache: Optional cache dictionary for training fingerprints.
                         Key is tuple of sorted train_ids, value is list of fingerprints.
+        query_fps_cache: Optional cache dictionary for query fingerprints.
+                        Key is SMILES string, value is fingerprint.
 
     Returns:
         Array of max similarities (one per query sample)
@@ -664,25 +676,57 @@ def compute_sim_to_train_mean(
     if len(valid_train_fps) == 0:
         return np.zeros(len(query_ids))
 
+    # Compute or retrieve query fingerprints using cache
+    query_fps = []
+    cache_key_base = f"{radius}_{n_bits}"
+    cache_hits = 0
+    cache_misses = 0
+
+    for smiles in query_smiles:
+        cache_key = f"{cache_key_base}_{smiles}"
+        if query_fps_cache is not None and cache_key in query_fps_cache:
+            query_fps.append(query_fps_cache[cache_key])
+            cache_hits += 1
+        else:
+            # Compute fingerprint
+            try:
+                mol = Chem.MolFromSmiles(smiles)
+                if mol is not None:
+                    fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius=radius, nBits=n_bits)
+                    query_fps.append(fp)
+                    # Cache the fingerprint
+                    if query_fps_cache is not None:
+                        query_fps_cache[cache_key] = fp
+                    cache_misses += 1
+                else:
+                    query_fps.append(None)
+                    cache_misses += 1
+            except Exception:
+                query_fps.append(None)
+                cache_misses += 1
+
+    if cache_hits > 0:
+        print(f"    Using cached fingerprints for {cache_hits} query samples, computed {cache_misses} new")
+
     # Compute similarities for query set using multiprocessing
     if n_jobs is None:
         n_jobs = max(1, cpu_count() - 1)
 
-    # Split query_smiles into chunks for parallel processing
-    chunk_size = max(1, len(query_smiles) // n_jobs)
-    query_smiles_chunks = [
-        query_smiles[i:i + chunk_size]
-        for i in range(0, len(query_smiles), chunk_size)
+    # Split query_fps into chunks for parallel processing
+    chunk_size = max(1, len(query_fps) // n_jobs)
+    query_fps_chunks = [
+        query_fps[i:i + chunk_size]
+        for i in range(0, len(query_fps), chunk_size)
     ]
 
     # Prepare arguments for workers
     worker_args = [
         (chunk, valid_train_fps, radius, n_bits)
-        for chunk in query_smiles_chunks
+        for chunk in query_fps_chunks
     ]
 
     # Process in parallel
-    print(f"    Computing similarities using {n_jobs} processes ({len(query_smiles)} queries, {len(valid_train_fps)} train samples)...")
+    print(f"    Computing similarities using {n_jobs} processes ({len(query_fps)} queries, {len(valid_train_fps)} train samples)...")
     similarities = []
     with Pool(processes=n_jobs) as pool:
         results = list(tqdm(pool.imap(_compute_similarities_worker, worker_args),
@@ -779,6 +823,33 @@ def compute_model_std(
 
     return stds
 
+def compute_prediction_uncertainty_features(
+    query_ids: List[str],
+    predictions: Dict[str, pd.Series]
+) -> Dict[str, np.ndarray]:
+    """予測の不確実性に関する特徴量"""
+    features = {}
+
+    # 既存のmodel_stdに加えて
+    pred_matrix = []
+    for model_name, pred_series in predictions.items():
+        pred_values = pred_series.loc[pred_series.index.isin(query_ids)].reindex(query_ids, fill_value=0.0)
+        pred_matrix.append(pred_values.values)
+
+    pred_array = np.array(pred_matrix).T  # (n_samples, n_models)
+
+    features['prediction_std'] = np.std(pred_array, axis=1)  # 既存
+    features['prediction_min'] = np.min(pred_array, axis=1)
+    features['prediction_max'] = np.max(pred_array, axis=1)
+    features['prediction_range'] = features['prediction_max'] - features['prediction_min']
+    features['prediction_entropy'] = -np.sum(pred_array * np.log(pred_array + 1e-8), axis=1)
+
+    # 高/低予測の割合
+    features['high_pred_ratio'] = np.mean(pred_array > 0.5, axis=1)
+    features['extreme_pred_ratio'] = np.mean((pred_array < 0.1) | (pred_array > 0.9), axis=1)
+
+    return features
+
 
 def build_level1_data(
     fold_idx: int,
@@ -790,7 +861,8 @@ def build_level1_data(
     config: Dict[str, Any],
     df_train: Optional[pd.DataFrame] = None,
     features_df: Optional[pd.DataFrame] = None,
-    train_fps_cache: Optional[Dict[Tuple[str, ...], List]] = None
+    train_fps_cache: Optional[Dict[Tuple[str, ...], List]] = None,
+    query_fps_cache: Optional[Dict[str, Any]] = None
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str]]:
     """Build level-1 training and validation data for stacking.
 
@@ -866,8 +938,8 @@ def build_level1_data(
 
         for feat_name in derived_features:
             if feat_name == 'sim_to_train_mean':
-                train_sim = compute_sim_to_train_mean(train_common_ids, train_common_ids, df_train, train_fps_cache=train_fps_cache)
-                valid_sim = compute_sim_to_train_mean(valid_common_ids, train_common_ids, df_train, train_fps_cache=train_fps_cache)
+                train_sim = compute_sim_to_train_mean(train_common_ids, train_common_ids, df_train, train_fps_cache=train_fps_cache, query_fps_cache=query_fps_cache)
+                valid_sim = compute_sim_to_train_mean(valid_common_ids, train_common_ids, df_train, train_fps_cache=train_fps_cache, query_fps_cache=query_fps_cache)
                 X_train_level1_list.append(train_sim.reshape(-1, 1))
                 X_valid_level1_list.append(valid_sim.reshape(-1, 1))
                 print(f"    Added sim_to_train_mean feature")
@@ -926,6 +998,14 @@ def create_meta_model(
         n_neg = len(y_train) - n_pos
         pos_weight = (n_neg / n_pos) if n_pos > 0 else 1.0
 
+        # Get early_stopping_rounds, default to 20 if not specified and validation set is provided
+        early_stopping_rounds = params.get('early_stopping_rounds', 20)
+        if early_stopping_rounds is None:
+            early_stopping_rounds = None
+        elif X_val is None or y_val is None:
+            # If no validation set provided, disable early stopping
+            early_stopping_rounds = None
+
         model = LGBMClassifier(
             n_estimators=params.get('n_estimators', 100),
             learning_rate=params.get('learning_rate', 0.05),
@@ -933,13 +1013,13 @@ def create_meta_model(
             max_depth=params.get('max_depth', 5),
             min_child_samples=params.get('min_child_samples', 20),
             pos_weight=pos_weight,
-            early_stopping_rounds=params.get('early_stopping_rounds', 20),
+            early_stopping_rounds=early_stopping_rounds,
             verbose=-1
         )
 
         # Convert to DataFrame for LGBMClassifier
         X_train_df = pd.DataFrame(X_train, columns=[f'feat_{i}' for i in range(X_train.shape[1])])
-        if X_val is not None and y_val is not None:
+        if X_val is not None and y_val is not None and early_stopping_rounds is not None:
             X_val_df = pd.DataFrame(X_val, columns=[f'feat_{i}' for i in range(X_val.shape[1])])
             model.fit(X_train_df, y_train, eval_set=(X_val_df, y_val))
         else:
@@ -1084,9 +1164,10 @@ def train_meta_learner_for_fold(
     df_train: Optional[pd.DataFrame] = None,
     features_df: Optional[pd.DataFrame] = None,
     n_trials: int = 50,
-    train_fps_cache: Optional[Dict[Tuple[str, ...], List]] = None
+    train_fps_cache: Optional[Dict[Tuple[str, ...], List]] = None,
+    query_fps_cache: Optional[Dict[str, Any]] = None
 ) -> Tuple[Any, str, Dict[str, Any], float, List[str], Optional[np.ndarray]]:
-    """Train meta-learner for a single fold using Optuna optimization.
+    """Train meta-learner for a single fold using Optuna optimization or default LGBM.
 
     Args:
         fold_idx: Fold index
@@ -1100,7 +1181,7 @@ def train_meta_learner_for_fold(
         output_dir: Output directory for Optuna study database
         df_train: Training DataFrame (for derived features)
         features_df: Molecular features DataFrame (optional)
-        n_trials: Number of Optuna trials
+        n_trials: Number of Optuna trials (only used if use_optuna=True)
 
     Returns:
         Tuple of (best_model, best_model_type, best_params, best_auc, valid_ids, y_pred)
@@ -1116,57 +1197,81 @@ def train_meta_learner_for_fold(
         config=config,
         df_train=df_train,
         features_df=features_df,
-        train_fps_cache=train_fps_cache
+        train_fps_cache=train_fps_cache,
+        query_fps_cache=query_fps_cache
     )
 
     if len(valid_ids) == 0 or X_train_level1.shape[0] == 0:
         print(f"    ⚠️  No data available for fold {fold_idx}")
         return None, None, {}, 0.0, [], None
 
-    # Create study for this fold
-    study_name = f"stacking_{task_key}_fold_{fold_idx}"
-    study = optuna.create_study(
-        direction='maximize',
-        study_name=study_name,
-        storage=f"sqlite:///{output_dir}/{study_name}.db",
-        load_if_exists=True
-    )
+    use_optuna = config.get('use_optuna', False)
 
-    # Optimize
-    remaining_trials = n_trials - len(study.trials)
-    if remaining_trials > 0:
-        print(f"    Running {remaining_trials} Optuna trials...")
-        study.optimize(
-            lambda trial: objective_meta_learner(
-                trial=trial,
-                X_train=X_train_level1,
-                y_train=y_train_level1,
-                X_valid=X_valid_level1,
-                y_valid=y_valid_level1,
-                model_names=model_names
-            ),
-            n_trials=remaining_trials,
-            show_progress_bar=True
+    if use_optuna:
+        # Use Optuna optimization
+        # Create study for this fold
+        study_name = f"stacking_{task_key}_fold_{fold_idx}"
+        study = optuna.create_study(
+            direction='maximize',
+            study_name=study_name,
+            storage=f"sqlite:///{output_dir}/{study_name}.db",
+            load_if_exists=True
         )
+
+        # Optimize
+        remaining_trials = n_trials - len(study.trials)
+        if remaining_trials > 0:
+            print(f"    Running {remaining_trials} Optuna trials...")
+            study.optimize(
+                lambda trial: objective_meta_learner(
+                    trial=trial,
+                    X_train=X_train_level1,
+                    y_train=y_train_level1,
+                    X_valid=X_valid_level1,
+                    y_valid=y_valid_level1,
+                    model_names=model_names
+                ),
+                n_trials=remaining_trials,
+                show_progress_bar=True
+            )
+        else:
+            print(f"    Using existing study with {len(study.trials)} trials")
+
+        # Get best result
+        best_trial = study.best_trial
+        best_params = best_trial.params.copy()
+        best_model_type = best_params.pop('model_type')
+
+        # Train best model on all level-1 training data
+        # NOTE: Do NOT use validation set for early stopping here, as it was already
+        # used in Optuna optimization. Using it again would cause data leakage.
+        # For LGBM, we use a fixed n_estimators (or increase it slightly) without early stopping.
+        if best_model_type == 'lgbm':
+            # Increase n_estimators slightly since we're not using early stopping
+            # The optimal n_estimators from Optuna trials (with early stopping) is unknown,
+            # so we use a conservative fixed value
+            best_params['n_estimators'] = best_params.get('n_estimators', 100) * 2
+            best_params['early_stopping_rounds'] = None  # Disable early stopping
     else:
-        print(f"    Using existing study with {len(study.trials)} trials")
+        # Use default LGBM without optimization
+        print(f"    Using default LGBM (no optimization)...")
+        best_model_type = 'lgbm'
+        # Merge default params with any overrides from config
+        best_params = DEFAULT_LGBM_PARAMS.copy()
+        if 'lgbm_params' in config:
+            best_params.update(config['lgbm_params'])
 
-    # Get best result
-    best_trial = study.best_trial
-    best_params = best_trial.params.copy()
-    best_model_type = best_params.pop('model_type')
-
-    # Train best model on all level-1 training data
     best_model = create_meta_model(
         model_type=best_model_type,
         params=best_params,
         X_train=X_train_level1,
         y_train=y_train_level1,
-        X_val=X_valid_level1,
-        y_val=y_valid_level1
+        X_val=None,  # Do not use validation set for training
+        y_val=None
     )
 
     # Predict on validation set to get final AUC
+    # This is the correct OOF prediction: model trained on other folds, predicting on this fold
     y_pred = predict_proba_meta_model(best_model, X_valid_level1, best_model_type)
     try:
         best_auc = roc_auc_score(y_valid_level1, y_pred)
@@ -1293,6 +1398,27 @@ def optimize_stacking_for_task(
     y_true.index = df_train['ID']
     print(f"Training data: {len(df_train)} samples")
 
+    # Calculate OOF AUC for all models
+    print(f"\n📊 Calculating OOF AUC for all models...")
+    oof_aucs = {}
+    for model_name, pred_series in tqdm(all_predictions.items(), desc="  Computing OOF AUC", leave=False):
+        # Find common IDs between predictions and labels
+        common_ids = sorted(set(pred_series.index) & set(y_true.index))
+        if len(common_ids) == 0:
+            continue
+
+        try:
+            pred_values = pred_series.loc[common_ids].values
+            true_values = y_true.loc[common_ids].values
+            oof_auc = roc_auc_score(true_values, pred_values)
+            oof_aucs[model_name] = oof_auc
+        except (ValueError, KeyError) as e:
+            # Handle case where only one class is present or other errors
+            print(f"    ⚠️  Error computing OOF AUC for {model_name}: {e}")
+            continue
+
+    print(f"  Computed OOF AUC for {len(oof_aucs)} models")
+
     # Load molecular features if enabled
     features_df = None
     if config.get('use_additional_features', False) or config.get('use_derived_features', False):
@@ -1313,72 +1439,154 @@ def optimize_stacking_for_task(
 
     # Initialize fingerprint cache for similarity computation (shared across folds)
     train_fps_cache: Dict[Tuple[str, ...], List] = {}
+    query_fps_cache: Dict[str, Any] = {}  # Cache for query fingerprints (shared across folds and tasks)
 
-    # Step 7: Train meta-learner for each fold
+    # Step 7: Train meta-learner
+    use_optuna = config.get('use_optuna', False)
     n_trials = config.get('n_trials', DEFAULT_N_TRIALS)
-    print(f"\n🚀 Starting nested CV stacking optimization with {n_trials} trials per fold...")
-    fold_models = []
-    fold_model_types = []
-    fold_params = []
-    fold_aucs = []
-    fold_valid_ids = []
-    fold_predictions = {}  # Store OOF predictions from training time
 
-    for fold_name, fold_data in tqdm(sorted(splits.items()), desc="Processing folds", total=len(splits)):
-        fold_idx = int(fold_name.split("_")[1])
+    if use_optuna:
+        # Nested CV with Optuna optimization
+        print(f"\n🚀 Starting nested CV stacking optimization with {n_trials} trials per fold...")
+        fold_models = []
+        fold_model_types = []
+        fold_params = []
+        fold_aucs = []
+        fold_valid_ids = []
+        fold_predictions = {}  # Store OOF predictions from training time
 
-        print(f"\n  Fold {fold_idx}/{n_folds}: Optimizing meta-learner...")
+        for fold_name, fold_data in tqdm(sorted(splits.items()), desc="Processing folds", total=len(splits)):
+            fold_idx = int(fold_name.split("_")[1])
 
-        # Train meta-learner for this fold
-        best_model, best_model_type, best_params, fold_auc, valid_ids, fold_pred = train_meta_learner_for_fold(
-            fold_idx=fold_idx,
-            splits=splits,
-            predictions=final_predictions,
-            y_true=y_true,
-            idx_to_id=idx_to_id,
-            model_names=final_model_names,
-            task_key=task_key,
-            config=config,
-            output_dir=output_dir,
-            df_train=df_train,
-            features_df=features_df,
-            n_trials=n_trials,
-            train_fps_cache=train_fps_cache
+            print(f"\n  Fold {fold_idx}/{n_folds}: Optimizing meta-learner...")
+
+            # Train meta-learner for this fold
+            best_model, best_model_type, best_params, fold_auc, valid_ids, fold_pred = train_meta_learner_for_fold(
+                fold_idx=fold_idx,
+                splits=splits,
+                predictions=final_predictions,
+                y_true=y_true,
+                idx_to_id=idx_to_id,
+                model_names=final_model_names,
+                task_key=task_key,
+                config=config,
+                output_dir=output_dir,
+                df_train=df_train,
+                features_df=features_df,
+                n_trials=n_trials,
+                train_fps_cache=train_fps_cache,
+                query_fps_cache=query_fps_cache
+            )
+
+            fold_models.append(best_model)
+            fold_model_types.append(best_model_type)
+            fold_params.append(best_params)
+            fold_aucs.append(fold_auc)
+            fold_valid_ids.append(valid_ids)
+
+            # Store predictions from training time (these are already computed correctly)
+            if fold_pred is not None and valid_ids is not None:
+                for id_val, pred in zip(valid_ids, fold_pred):
+                    fold_predictions[id_val] = pred
+
+            print(f"    Best model: {best_model_type}, AUC: {fold_auc:.6f}")
+            if best_params:
+                print(f"    Best params: {best_params}")
+
+        # Use predictions computed during training (already stored in fold_predictions)
+        print(f"\n📝 Using OOF predictions computed during training...")
+        oof_predictions = fold_predictions
+
+        # Convert to arrays for final evaluation
+        oof_ids = sorted(oof_predictions.keys())
+        oof_pred_array = np.array([oof_predictions[id_val] for id_val in oof_ids])
+        oof_true_array = y_true.loc[oof_ids].values
+
+        # Calculate final AUC on all OOF predictions
+        try:
+            final_auc = roc_auc_score(oof_true_array, oof_pred_array)
+        except ValueError:
+            final_auc = 0.0
+
+        # Calculate statistics
+        mean_auc = np.mean(fold_aucs)
+        std_auc = np.std(fold_aucs)
+    else:
+        # No optimization: train single meta-learner on all data
+        print(f"\n🚀 Training single meta-learner on all data with default LGBM (no optimization)...")
+
+        # Build level-1 data using all training data
+        all_train_ids = list(df_train['ID'].values)
+
+        # Build base prediction matrix for all data
+        n_models = len(final_model_names)
+        X_all_pred = np.zeros((len(all_train_ids), n_models))
+        for i, model_name in enumerate(final_model_names):
+            X_all_pred[:, i] = final_predictions[model_name].loc[all_train_ids].values
+
+        X_all_level1_list = [X_all_pred]
+
+        # Add molecular features if enabled
+        if config.get('use_additional_features', False) and features_df is not None:
+            all_features = features_df.loc[features_df.index.isin(all_train_ids)].reindex(all_train_ids, fill_value=0.0)
+            X_all_level1_list.append(all_features.values)
+            print(f"    Added {len(all_features.columns)} molecular features")
+
+        # Add derived features if enabled
+        if config.get('use_derived_features', False) and df_train is not None:
+            derived_features = config.get('derived_features', [])
+            for feat_name in derived_features:
+                if feat_name == 'sim_to_train_mean':
+                    all_sim = compute_sim_to_train_mean(all_train_ids, all_train_ids, df_train, train_fps_cache=train_fps_cache, query_fps_cache=query_fps_cache)
+                    X_all_level1_list.append(all_sim.reshape(-1, 1))
+                    print(f"    Added sim_to_train_mean feature")
+                elif feat_name == 'cluster_density':
+                    if features_df is not None:
+                        n_clusters = config.get('cluster_n_clusters', DEFAULT_CLUSTER_N_CLUSTERS)
+                        all_cluster = compute_cluster_density(all_train_ids, all_train_ids, features_df, n_clusters)
+                        X_all_level1_list.append(all_cluster.reshape(-1, 1))
+                        print(f"    Added cluster_density feature")
+                elif feat_name == 'model_std':
+                    all_std = compute_model_std(all_train_ids, final_predictions)
+                    X_all_level1_list.append(all_std.reshape(-1, 1))
+                    print(f"    Added model_std feature")
+
+        X_all_level1 = np.hstack(X_all_level1_list)
+        y_all_level1 = y_true.loc[all_train_ids].values
+
+        # Train single meta-learner
+        best_model_type = 'lgbm'
+        best_params = DEFAULT_LGBM_PARAMS.copy()
+        if 'lgbm_params' in config:
+            best_params.update(config['lgbm_params'])
+
+        best_model = create_meta_model(
+            model_type=best_model_type,
+            params=best_params,
+            X_train=X_all_level1,
+            y_train=y_all_level1,
+            X_val=None,
+            y_val=None
         )
 
-        fold_models.append(best_model)
-        fold_model_types.append(best_model_type)
-        fold_params.append(best_params)
-        fold_aucs.append(fold_auc)
-        fold_valid_ids.append(valid_ids)
+        # For non-optimization mode, we don't generate OOF predictions
+        # (since we trained on all data, there's no out-of-fold prediction)
+        fold_models = [best_model]
+        fold_model_types = [best_model_type]
+        fold_params = [best_params]
+        fold_aucs = []
+        fold_valid_ids = []
+        fold_predictions = {}
 
-        # Store predictions from training time (these are already computed correctly)
-        if fold_pred is not None and valid_ids is not None:
-            for id_val, pred in zip(valid_ids, fold_pred):
-                fold_predictions[id_val] = pred
+        print(f"    Trained single meta-learner: {best_model_type}")
 
-        print(f"    Best model: {best_model_type}, AUC: {fold_auc:.6f}")
-        if best_params:
-            print(f"    Best params: {best_params}")
-
-    # Use predictions computed during training (already stored in fold_predictions)
-    print(f"\n📝 Using OOF predictions computed during training...")
-    oof_predictions = fold_predictions
-
-    # Convert to arrays for final evaluation
-    oof_ids = sorted(oof_predictions.keys())
-    oof_pred_array = np.array([oof_predictions[id_val] for id_val in oof_ids])
-    oof_true_array = y_true.loc[oof_ids].values
-
-    # Calculate final AUC on all OOF predictions
-    try:
-        final_auc = roc_auc_score(oof_true_array, oof_pred_array)
-    except ValueError:
+        # No OOF predictions available (trained on all data)
+        oof_ids = []
+        oof_pred_array = np.array([])
+        oof_true_array = np.array([])
         final_auc = 0.0
-
-    # Calculate statistics
-    mean_auc = np.mean(fold_aucs)
-    std_auc = np.std(fold_aucs)
+        mean_auc = 0.0
+        std_auc = 0.0
 
     # Count model type usage
     model_type_counts = {}
@@ -1386,12 +1594,18 @@ def optimize_stacking_for_task(
         if mt:
             model_type_counts[mt] = model_type_counts.get(mt, 0) + 1
 
-    print(f"\n✅ Nested CV stacking optimization completed!")
-    print(f"Mean fold AUC: {mean_auc:.6f} ± {std_auc:.6f}")
-    print(f"Final OOF AUC: {final_auc:.6f}")
-    print(f"Meta-model type usage:")
-    for mt, count in sorted(model_type_counts.items()):
-        print(f"  - {mt}: {count}/{n_folds} folds")
+    if use_optuna:
+        print(f"\n✅ Nested CV stacking optimization completed!")
+        print(f"Mean fold AUC: {mean_auc:.6f} ± {std_auc:.6f}")
+        print(f"Final OOF AUC: {final_auc:.6f}")
+        print(f"Meta-model type usage:")
+        for mt, count in sorted(model_type_counts.items()):
+            print(f"  - {mt}: {count}/{n_folds} folds")
+    else:
+        print(f"\n✅ Single meta-learner training completed!")
+        print(f"Trained on all {len(all_train_ids)} samples")
+        print(f"Meta-model type: {best_model_type}")
+        print(f"Note: No OOF predictions available (trained on all data)")
 
     # Save results
     result = {
@@ -1409,6 +1623,7 @@ def optimize_stacking_for_task(
         'selected_models': diverse_models,
         'top_models': top_models,
         'cv_scores': cv_scores,
+        'oof_aucs': oof_aucs,
         'n_samples': len(oof_ids),
         'n_folds': n_folds,
         'n_trials_per_fold': n_trials,
@@ -1429,38 +1644,70 @@ def optimize_stacking_for_task(
         json.dump(result, f, indent=2)
     print(f"\nResults saved to {result_path}")
 
-    # Save ensemble predictions
-    ensemble_df = pd.DataFrame({
-        'ID': oof_ids,
-        'prediction': oof_pred_array
-    })
-    ensemble_path = output_dir / f"ensemble_oof_stacking_{task_key}.csv"
-    ensemble_df.to_csv(ensemble_path, index=False)
-    print(f"Ensemble predictions saved to {ensemble_path}")
+    # Save CV scores and OOF AUCs to CSV
+    # Collect all model names
+    all_model_names = set(cv_scores.keys()) | set(oof_aucs.keys())
 
-    # Also save CV model average predictions (simple average of base models)
-    print(f"\n📊 Generating CV model average predictions...")
-    cv_avg_pred_array = np.zeros(len(oof_ids))
-    for model_name in final_model_names:
-        cv_avg_pred_array += final_predictions[model_name].loc[oof_ids].values
-    cv_avg_pred_array /= len(final_model_names)
-    cv_avg_pred_array = np.clip(cv_avg_pred_array, 0, 1)
+    model_scores_list = []
+    for model_name in all_model_names:
+        cv_score = cv_scores.get(model_name, None)
+        oof_auc = oof_aucs.get(model_name, None)
+        # Use OOF AUC for sorting if available, otherwise CV score
+        sort_key = oof_auc if oof_auc is not None else (cv_score if cv_score is not None else 0.0)
+        model_scores_list.append({
+            'model_name': model_name,
+            'cv_roc_auc': cv_score,
+            'oof_auc': oof_auc,
+            'sort_key': sort_key
+        })
 
-    cv_avg_df = pd.DataFrame({
-        'ID': oof_ids,
-        'prediction': cv_avg_pred_array
-    })
-    cv_avg_path = output_dir / f"ensemble_oof_cv_avg_{task_key}.csv"
-    cv_avg_df.to_csv(cv_avg_path, index=False)
-    print(f"CV average predictions saved to {cv_avg_path}")
+    # Sort by sort_key (prefer OOF AUC, fallback to CV score)
+    model_scores_list.sort(key=lambda x: x['sort_key'] if x['sort_key'] is not None else 0.0, reverse=True)
 
-    # Calculate CV average AUC
-    try:
-        cv_avg_auc = roc_auc_score(oof_true_array, cv_avg_pred_array)
-        print(f"CV average AUC: {cv_avg_auc:.6f}")
-        result['cv_avg_auc'] = float(cv_avg_auc)
-    except ValueError:
-        pass
+    # Remove sort_key before saving
+    for item in model_scores_list:
+        item.pop('sort_key', None)
+
+    model_scores_df = pd.DataFrame(model_scores_list)
+    model_scores_path = output_dir / f"model_scores_{task_key}.csv"
+    model_scores_df.to_csv(model_scores_path, index=False)
+    print(f"Model scores (CV and OOF AUC) saved to {model_scores_path}")
+
+    # Save ensemble predictions (only if OOF predictions are available)
+    if len(oof_ids) > 0:
+        ensemble_df = pd.DataFrame({
+            'ID': oof_ids,
+            'prediction': oof_pred_array
+        })
+        ensemble_path = output_dir / f"ensemble_oof_stacking_{task_key}.csv"
+        ensemble_df.to_csv(ensemble_path, index=False)
+        print(f"Ensemble predictions saved to {ensemble_path}")
+
+        # Also save CV model average predictions (simple average of base models)
+        print(f"\n📊 Generating CV model average predictions...")
+        cv_avg_pred_array = np.zeros(len(oof_ids))
+        for model_name in final_model_names:
+            cv_avg_pred_array += final_predictions[model_name].loc[oof_ids].values
+        cv_avg_pred_array /= len(final_model_names)
+        cv_avg_pred_array = np.clip(cv_avg_pred_array, 0, 1)
+
+        cv_avg_df = pd.DataFrame({
+            'ID': oof_ids,
+            'prediction': cv_avg_pred_array
+        })
+        cv_avg_path = output_dir / f"ensemble_oof_cv_avg_{task_key}.csv"
+        cv_avg_df.to_csv(cv_avg_path, index=False)
+        print(f"CV average predictions saved to {cv_avg_path}")
+
+        # Calculate CV average AUC
+        try:
+            cv_avg_auc = roc_auc_score(oof_true_array, cv_avg_pred_array)
+            print(f"CV average AUC: {cv_avg_auc:.6f}")
+            result['cv_avg_auc'] = float(cv_avg_auc)
+        except ValueError:
+            pass
+    else:
+        print(f"\n⚠️  Skipping OOF prediction saving (no OOF predictions available)")
 
     # Update result file
     with open(result_path, 'w') as f:
@@ -1593,7 +1840,8 @@ def generate_test_predictions_from_stacking(
     config: Dict[str, Any],
     df_train: Optional[pd.DataFrame] = None,
     features_df: Optional[pd.DataFrame] = None,
-    train_fps_cache: Optional[Dict[Tuple[str, ...], List]] = None
+    train_fps_cache: Optional[Dict[Tuple[str, ...], List]] = None,
+    query_fps_cache: Optional[Dict[str, Any]] = None
 ) -> pd.DataFrame:
     """Generate test predictions using stacking ensemble (CV meta-learners).
 
@@ -1655,7 +1903,7 @@ def generate_test_predictions_from_stacking(
 
         for feat_name in derived_features:
             if feat_name == 'sim_to_train_mean':
-                test_sim = compute_sim_to_train_mean(common_ids, all_train_ids, df_train, train_fps_cache=train_fps_cache)
+                test_sim = compute_sim_to_train_mean(common_ids, all_train_ids, df_train, train_fps_cache=train_fps_cache, query_fps_cache=query_fps_cache)
                 X_test_level1_list.append(test_sim.reshape(-1, 1))
                 print(f"    Added sim_to_train_mean feature")
 
@@ -1819,12 +2067,14 @@ def create_final_submission_from_stacking_v2(output_dir: Path, use_cv_avg: bool 
     return final_submission
 
 
-def main(config_path: Optional[str] = None, output_dir: Optional[str] = None):
+def main(config_path: Optional[str] = None, output_dir: Optional[str] = None, use_optuna: Optional[bool] = None):
     """Main function to optimize stacking ensembles for all tasks.
 
     Args:
         config_path: Path to YAML config file (optional)
         output_dir: Output directory path (optional, defaults to data/ensembles_stacking_v2)
+        use_optuna: Whether to use Optuna optimization. If None, uses config value.
+                    If specified, overrides config value.
     """
     print("="*70)
     print("Stacking Ensemble Optimization v2 for All Tasks")
@@ -1840,7 +2090,18 @@ def main(config_path: Optional[str] = None, output_dir: Optional[str] = None):
 
     # Load configuration
     config = load_config(config_path)
+
+    # Override use_optuna if specified via command line
+    if use_optuna is not None:
+        config['use_optuna'] = use_optuna
+        print(f"\n⚠️  use_optuna overridden by command line argument: {use_optuna}")
+
     print(f"\nConfiguration:")
+    print(f"  Use Optuna optimization: {config.get('use_optuna', False)}")
+    if not config.get('use_optuna', False):
+        print(f"  Using default LGBM parameters: {DEFAULT_LGBM_PARAMS}")
+    else:
+        print(f"  N trials per fold: {config.get('n_trials', DEFAULT_N_TRIALS)}")
     print(f"  Use additional features: {config.get('use_additional_features', False)}")
     print(f"  Feature groups: {config.get('feature_groups', [])}")
     print(f"  Use derived features: {config.get('use_derived_features', False)}")
@@ -1848,7 +2109,6 @@ def main(config_path: Optional[str] = None, output_dir: Optional[str] = None):
     print(f"  Top N models: {config.get('top_n_models', DEFAULT_TOP_N)}")
     print(f"  Lambda correlation: {config.get('lambda_correlation', DEFAULT_LAMBDA_CORRELATION)}")
     print(f"  Max diverse models: {config.get('max_diverse_models', DEFAULT_MAX_DIVERSE_MODELS)}")
-    print(f"  N trials per fold: {config.get('n_trials', DEFAULT_N_TRIALS)}")
 
     all_results = []
 
@@ -1963,6 +2223,7 @@ if __name__ == "__main__":
     output_dir = None
     create_submission_only = False
     use_cv_avg = True
+    use_optuna = None  # None means use config value
 
     i = 1
     while i < len(sys.argv):
@@ -1978,6 +2239,12 @@ if __name__ == "__main__":
         elif sys.argv[i] == "--use-stacking":
             use_cv_avg = False
             i += 1
+        elif sys.argv[i] == "--use-optuna":
+            use_optuna = True
+            i += 1
+        elif sys.argv[i] == "--no-optuna":
+            use_optuna = False
+            i += 1
         elif sys.argv[i] == "--help":
             print("Usage: python optimize_ensemble_stacking_v2.py [OPTIONS]")
             print("Options:")
@@ -1985,6 +2252,8 @@ if __name__ == "__main__":
             print("  --output-dir OUTPUT_DIR  Output directory (default: data/ensembles_stacking_v2)")
             print("  --create-submission      Only create submission file from existing predictions")
             print("  --use-stacking           Use stacking predictions instead of CV average (default: CV average)")
+            print("  --use-optuna             Use Optuna optimization (overrides config)")
+            print("  --no-optuna              Disable Optuna optimization, use default LGBM (overrides config)")
             print("  --help                   Show this help message")
             sys.exit(0)
         else:
@@ -2007,5 +2276,5 @@ if __name__ == "__main__":
         create_final_submission_from_stacking_v2(output_dir_path, use_cv_avg=use_cv_avg)
     else:
         # Run full optimization and then create submission
-        main(config_path=config_path, output_dir=output_dir)
+        main(config_path=config_path, output_dir=output_dir, use_optuna=use_optuna)
 
