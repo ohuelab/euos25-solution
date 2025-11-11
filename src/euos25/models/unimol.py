@@ -1293,15 +1293,24 @@ class UniMolModel(BaseClfModel):
             collate_fn=self.model.backbone.batch_collate_fn  # Use model's collate function
         )
 
+        # For prediction, use single GPU to avoid DDP issues
+        # Create a new trainer for prediction (without DDP)
+        predict_trainer = pl.Trainer(
+            accelerator=self.accelerator,
+            devices=1,  # Use single device for prediction
+            enable_progress_bar=True,
+            logger=False,
+            enable_model_summary=False,
+            num_sanity_val_steps=0,
+        )
+
         # Predict
         self.model.eval()
-        predictions = self.trainer.predict(self.model, test_loader)
+        predictions = predict_trainer.predict(self.model, test_loader)
 
-        # Handle distributed predictions: in DDP mode, predictions is a list of lists (one per device)
-        # Flatten if needed
-        if predictions and isinstance(predictions[0], list):
-            # Distributed mode: flatten the list of lists
-            predictions = [pred for device_preds in predictions for pred in device_preds]
+        # Handle predictions (should be simpler without DDP)
+        if predictions is None or len(predictions) == 0:
+            raise ValueError("No predictions returned from trainer")
 
         # Convert to numpy array
         probs = torch.cat(predictions)

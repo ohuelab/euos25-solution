@@ -65,6 +65,19 @@ class ParamSearchConfig(BaseModel):
     log: bool = False  # Use log scale for float/int
 
 
+class CategoricalEncodingConfig(BaseModel):
+    """Configuration for categorical encoding (Label Encoding and Target Encoding)."""
+
+    enable: bool = False
+    use_label_encoding: bool = True
+    use_target_encoding: bool = True
+    descriptor_columns: Optional[List[str]] = None  # If None, auto-detect
+    max_unique_values: int = 100  # Maximum unique values to consider as categorical
+    auto_detect: bool = True  # Auto-detect categorical descriptors if descriptor_columns is None
+    nested_cv_folds: int = 3  # Number of inner CV folds for nested CV
+    target_encoding_smoothing: float = 1.0  # Smoothing parameter for target encoding
+
+
 class OptunaConfig(BaseModel):
     """Configuration for Optuna hyperparameter optimization.
 
@@ -130,6 +143,9 @@ class Config(BaseModel):
 
     imbalance: ImbalanceConfig = Field(default_factory=ImbalanceConfig)
     plates: PlatesConfig = Field(default_factory=PlatesConfig)
+    categorical_encoding: CategoricalEncodingConfig = Field(
+        default_factory=CategoricalEncodingConfig
+    )
     optuna: OptunaConfig = Field(default_factory=OptunaConfig)
 
     # Task configuration
