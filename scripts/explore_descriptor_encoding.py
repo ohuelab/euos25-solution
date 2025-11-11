@@ -77,11 +77,18 @@ def evaluate_encoding_for_descriptor(
     Returns:
         Dictionary with evaluation scores
     """
-    results = {}
+    results = {"baseline_score": np.nan}
 
     # Check if descriptor column exists
     if descriptor_col not in features.columns:
-        return {"label_encoding_score": np.nan, "target_encoding_score": np.nan}
+        logger.warning(f"Descriptor column {descriptor_col} not found in features")
+        if use_label_encoding:
+            results["label_encoding_score"] = np.nan
+            results["label_encoding_improvement"] = np.nan
+        if use_target_encoding:
+            results["target_encoding_score"] = np.nan
+            results["target_encoding_improvement"] = np.nan
+        return results
 
     # Get outer CV scores
     outer_scores_label = []
@@ -127,9 +134,12 @@ def evaluate_encoding_for_descriptor(
             )
             baseline_pred = baseline_model.predict_proba(X_valid_baseline)
             baseline_score = calc_roc_auc(y_valid.values, baseline_pred)
-            outer_scores_baseline.append(baseline_score)
+            if not np.isnan(baseline_score):
+                outer_scores_baseline.append(baseline_score)
+            else:
+                outer_scores_baseline.append(np.nan)
         except Exception as e:
-            logger.debug(f"Baseline model failed for {descriptor_col}: {e}")
+            logger.warning(f"Baseline model failed for {descriptor_col} in {fold_name}: {e}")
             outer_scores_baseline.append(np.nan)
 
         # Label encoding
@@ -155,11 +165,14 @@ def evaluate_encoding_for_descriptor(
                     )
                     label_pred = label_model.predict_proba(X_valid_label)
                     label_score = calc_roc_auc(y_valid.values, label_pred)
-                    outer_scores_label.append(label_score)
+                    if not np.isnan(label_score):
+                        outer_scores_label.append(label_score)
+                    else:
+                        outer_scores_label.append(np.nan)
                 else:
                     outer_scores_label.append(np.nan)
             except Exception as e:
-                logger.debug(f"Label encoding failed for {descriptor_col}: {e}")
+                logger.warning(f"Label encoding failed for {descriptor_col} in {fold_name}: {e}")
                 outer_scores_label.append(np.nan)
 
         # Target encoding with nested CV
@@ -208,7 +221,8 @@ def evaluate_encoding_for_descriptor(
                         )
                         inner_pred = inner_model.predict_proba(X_inner_valid_target)
                         inner_score = calc_roc_auc(y_inner_valid.values, inner_pred)
-                        inner_scores.append(inner_score)
+                        if not np.isnan(inner_score):
+                            inner_scores.append(inner_score)
 
                 if len(inner_scores) > 0:
                     # Use average inner CV score
@@ -216,7 +230,7 @@ def evaluate_encoding_for_descriptor(
                 else:
                     outer_scores_target.append(np.nan)
             except Exception as e:
-                logger.debug(f"Target encoding failed for {descriptor_col}: {e}")
+                logger.warning(f"Target encoding failed for {descriptor_col} in {fold_name}: {e}")
                 outer_scores_target.append(np.nan)
 
     # Calculate average scores
@@ -363,31 +377,52 @@ def explore_descriptor_encoding(
             continue
 
     # Create results DataFrame
+    if len(results) == 0:
+        logger.warning("No results collected, returning empty DataFrame")
+        return pd.DataFrame()
+
     results_df = pd.DataFrame(results)
 
-    # Calculate importance scores (weighted by improvement)
+    # Ensure required columns exist
+    required_cols = ["descriptor", "unique_values", "baseline_score"]
     if use_label_encoding:
+        required_cols.extend(["label_encoding_score", "label_encoding_improvement"])
+    if use_target_encoding:
+        required_cols.extend(["target_encoding_score", "target_encoding_improvement"])
+
+    # Add missing columns with NaN
+    for col in required_cols:
+        if col not in results_df.columns:
+            results_df[col] = np.nan
+
+    # Calculate importance scores (weighted by improvement)
+    if use_label_encoding and "label_encoding_improvement" in results_df.columns and "label_encoding_score" in results_df.columns:
         results_df["label_encoding_importance"] = (
             results_df["label_encoding_improvement"] * results_df["label_encoding_score"]
         )
-    if use_target_encoding:
+    if use_target_encoding and "target_encoding_improvement" in results_df.columns and "target_encoding_score" in results_df.columns:
         results_df["target_encoding_importance"] = (
             results_df["target_encoding_improvement"] * results_df["target_encoding_score"]
         )
 
     # Sort by importance
-    if use_target_encoding:
+    if use_target_encoding and "target_encoding_importance" in results_df.columns:
         results_df = results_df.sort_values(
-            "target_encoding_importance", ascending=False
+            "target_encoding_importance", ascending=False, na_position="last"
         )
-    elif use_label_encoding:
+    elif use_label_encoding and "label_encoding_importance" in results_df.columns:
         results_df = results_df.sort_values(
-            "label_encoding_importance", ascending=False
+            "label_encoding_importance", ascending=False, na_position="last"
+        )
+    elif "baseline_score" in results_df.columns:
+        # Fallback: sort by baseline_score
+        results_df = results_df.sort_values(
+            "baseline_score", ascending=False, na_position="last"
         )
 
     # Save results
     save_csv(results_df, output_path)
-    logger.info(f"Saved results to {output_path}")
+    logger.info(f"Saved {len(results_df)} results to {output_path}")
 
     return results_df
 
