@@ -62,6 +62,8 @@ DEFAULT_LAMBDA_CORRELATION = 0.1
 DEFAULT_MAX_DIVERSE_MODELS = 15
 DEFAULT_N_TRIALS = 50
 DEFAULT_CLUSTER_N_CLUSTERS = 50
+DEFAULT_RADIUS = 3
+DEFAULT_N_BITS = 2048
 
 # Default LGBM parameters for meta-learner (when not using Optuna)
 DEFAULT_LGBM_PARAMS = {
@@ -509,6 +511,39 @@ def load_splits(task_key: str) -> Dict:
     return splits
 
 
+def load_similarity_matrix(
+    task_key: str,
+    feature_dir: str,
+    radius: int = DEFAULT_RADIUS,
+    n_bits: int = DEFAULT_N_BITS
+) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """Load precomputed similarity matrix.
+
+    Args:
+        task_key: Task key
+        feature_dir: Feature directory where similarity matrix is stored
+        radius: ECFP radius
+        n_bits: Number of bits
+
+    Returns:
+        Tuple of (similarity_matrix, ids_array) or None if not found
+    """
+    matrix_path = processed_base_dir / feature_dir / f"similarity_matrix_r{radius}_b{n_bits}.npy"
+    ids_path = processed_base_dir / feature_dir / f"similarity_matrix_ids_r{radius}_b{n_bits}.npy"
+
+    if not matrix_path.exists() or not ids_path.exists():
+        return None
+
+    try:
+        similarity_matrix = np.load(matrix_path)
+        ids = np.load(ids_path)
+        print(f"  Loaded similarity matrix: shape={similarity_matrix.shape}, {len(ids)} molecules")
+        return similarity_matrix, ids
+    except Exception as e:
+        print(f"  ⚠️  Error loading similarity matrix: {e}")
+        return None
+
+
 def load_molecular_features(task_key: str, prepared_file: str, feature_dir: str, feature_groups: List[str]) -> Optional[pd.DataFrame]:
     """Load molecular features from parquet file.
 
@@ -610,16 +645,18 @@ def compute_sim_to_train_mean(
     train_ids: List[str],
     df_train: pd.DataFrame,
     smiles_col: str = 'SMILES',
-    radius: int = 3,
-    n_bits: int = 2048,
+    radius: int = DEFAULT_RADIUS,
+    n_bits: int = DEFAULT_N_BITS,
     n_jobs: Optional[int] = None,
     train_fps_cache: Optional[Dict[Tuple[str, ...], List]] = None,
-    query_fps_cache: Optional[Dict[str, Any]] = None
+    query_fps_cache: Optional[Dict[str, Any]] = None,
+    similarity_matrix: Optional[np.ndarray] = None,
+    similarity_matrix_ids: Optional[np.ndarray] = None
 ) -> np.ndarray:
     """Compute max/mean Tanimoto similarity to training data using ECFP.
 
     For each query sample, compute Tanimoto similarity to all training samples
-    and return the maximum similarity.
+    and return the mean similarity.
 
     Args:
         query_ids: List of query sample IDs
@@ -633,12 +670,48 @@ def compute_sim_to_train_mean(
                         Key is tuple of sorted train_ids, value is list of fingerprints.
         query_fps_cache: Optional cache dictionary for query fingerprints.
                         Key is SMILES string, value is fingerprint.
+        similarity_matrix: Optional precomputed similarity matrix (n_molecules, n_molecules)
+        similarity_matrix_ids: Optional array of IDs corresponding to similarity_matrix rows/columns
 
     Returns:
-        Array of max similarities (one per query sample)
+        Array of mean similarities (one per query sample)
     """
     if len(train_ids) == 0:
         return np.zeros(len(query_ids))
+
+    # Use precomputed similarity matrix if available
+    if similarity_matrix is not None and similarity_matrix_ids is not None:
+        # Create mapping from ID to index in similarity matrix
+        id_to_idx = {id_val: idx for idx, id_val in enumerate(similarity_matrix_ids)}
+
+        # Get indices for query and train IDs (preserve order)
+        query_indices = []
+        query_idx_map = {}  # Map from query_ids index to similarity_matrix index
+        for i, id_val in enumerate(query_ids):
+            if id_val in id_to_idx:
+                sim_idx = id_to_idx[id_val]
+                query_indices.append(sim_idx)
+                query_idx_map[i] = len(query_indices) - 1
+
+        train_indices = [id_to_idx[id_val] for id_val in train_ids if id_val in id_to_idx]
+
+        if len(query_indices) == 0 or len(train_indices) == 0:
+            return np.zeros(len(query_ids))
+
+        # Extract similarity submatrix
+        sim_submatrix = similarity_matrix[np.ix_(query_indices, train_indices)]
+
+        # Compute mean similarity for each query
+        mean_similarities = np.mean(sim_submatrix, axis=1)
+
+        # Map back to original query_ids order (handle missing IDs)
+        result = np.zeros(len(query_ids))
+        for i, id_val in enumerate(query_ids):
+            if i in query_idx_map:
+                result[i] = mean_similarities[query_idx_map[i]]
+
+        print(f"    Using precomputed similarity matrix ({len(query_indices)} queries, {len(train_indices)} train samples)")
+        return result
 
     # Get SMILES for query and train
     query_smiles = df_train.loc[df_train['ID'].isin(query_ids), smiles_col].values
@@ -862,7 +935,9 @@ def build_level1_data(
     df_train: Optional[pd.DataFrame] = None,
     features_df: Optional[pd.DataFrame] = None,
     train_fps_cache: Optional[Dict[Tuple[str, ...], List]] = None,
-    query_fps_cache: Optional[Dict[str, Any]] = None
+    query_fps_cache: Optional[Dict[str, Any]] = None,
+    similarity_matrix: Optional[np.ndarray] = None,
+    similarity_matrix_ids: Optional[np.ndarray] = None
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str]]:
     """Build level-1 training and validation data for stacking.
 
@@ -938,8 +1013,8 @@ def build_level1_data(
 
         for feat_name in derived_features:
             if feat_name == 'sim_to_train_mean':
-                train_sim = compute_sim_to_train_mean(train_common_ids, train_common_ids, df_train, train_fps_cache=train_fps_cache, query_fps_cache=query_fps_cache)
-                valid_sim = compute_sim_to_train_mean(valid_common_ids, train_common_ids, df_train, train_fps_cache=train_fps_cache, query_fps_cache=query_fps_cache)
+                train_sim = compute_sim_to_train_mean(train_common_ids, train_common_ids, df_train, train_fps_cache=train_fps_cache, query_fps_cache=query_fps_cache, similarity_matrix=similarity_matrix, similarity_matrix_ids=similarity_matrix_ids)
+                valid_sim = compute_sim_to_train_mean(valid_common_ids, train_common_ids, df_train, train_fps_cache=train_fps_cache, query_fps_cache=query_fps_cache, similarity_matrix=similarity_matrix, similarity_matrix_ids=similarity_matrix_ids)
                 X_train_level1_list.append(train_sim.reshape(-1, 1))
                 X_valid_level1_list.append(valid_sim.reshape(-1, 1))
                 print(f"    Added sim_to_train_mean feature")
@@ -1165,7 +1240,9 @@ def train_meta_learner_for_fold(
     features_df: Optional[pd.DataFrame] = None,
     n_trials: int = 50,
     train_fps_cache: Optional[Dict[Tuple[str, ...], List]] = None,
-    query_fps_cache: Optional[Dict[str, Any]] = None
+    query_fps_cache: Optional[Dict[str, Any]] = None,
+    similarity_matrix: Optional[np.ndarray] = None,
+    similarity_matrix_ids: Optional[np.ndarray] = None
 ) -> Tuple[Any, str, Dict[str, Any], float, List[str], Optional[np.ndarray]]:
     """Train meta-learner for a single fold using Optuna optimization or default LGBM.
 
@@ -1198,7 +1275,9 @@ def train_meta_learner_for_fold(
         df_train=df_train,
         features_df=features_df,
         train_fps_cache=train_fps_cache,
-        query_fps_cache=query_fps_cache
+        query_fps_cache=query_fps_cache,
+        similarity_matrix=similarity_matrix,
+        similarity_matrix_ids=similarity_matrix_ids
     )
 
     if len(valid_ids) == 0 or X_train_level1.shape[0] == 0:
@@ -1441,6 +1520,20 @@ def optimize_stacking_for_task(
     train_fps_cache: Dict[Tuple[str, ...], List] = {}
     query_fps_cache: Dict[str, Any] = {}  # Cache for query fingerprints (shared across folds and tasks)
 
+    # Load similarity matrix if available
+    similarity_matrix = None
+    similarity_matrix_ids = None
+    if config.get('use_derived_features', False) and 'sim_to_train_mean' in config.get('derived_features', []):
+        feature_dir = config.get('feature_dir', 'ecfp4')
+        radius = config.get('similarity_radius', DEFAULT_RADIUS)
+        n_bits = config.get('similarity_n_bits', DEFAULT_N_BITS)
+        print(f"\n🔍 Loading similarity matrix (radius={radius}, n_bits={n_bits})...")
+        sim_result = load_similarity_matrix(task_key, feature_dir, radius=radius, n_bits=n_bits)
+        if sim_result is not None:
+            similarity_matrix, similarity_matrix_ids = sim_result
+        else:
+            print(f"  ⚠️  Similarity matrix not found, will compute on-the-fly")
+
     # Step 7: Train meta-learner
     use_optuna = config.get('use_optuna', False)
     n_trials = config.get('n_trials', DEFAULT_N_TRIALS)
@@ -1475,7 +1568,9 @@ def optimize_stacking_for_task(
                 features_df=features_df,
                 n_trials=n_trials,
                 train_fps_cache=train_fps_cache,
-                query_fps_cache=query_fps_cache
+                query_fps_cache=query_fps_cache,
+                similarity_matrix=similarity_matrix,
+                similarity_matrix_ids=similarity_matrix_ids
             )
 
             fold_models.append(best_model)
@@ -1537,7 +1632,7 @@ def optimize_stacking_for_task(
             derived_features = config.get('derived_features', [])
             for feat_name in derived_features:
                 if feat_name == 'sim_to_train_mean':
-                    all_sim = compute_sim_to_train_mean(all_train_ids, all_train_ids, df_train, train_fps_cache=train_fps_cache, query_fps_cache=query_fps_cache)
+                    all_sim = compute_sim_to_train_mean(all_train_ids, all_train_ids, df_train, train_fps_cache=train_fps_cache, query_fps_cache=query_fps_cache, similarity_matrix=similarity_matrix, similarity_matrix_ids=similarity_matrix_ids)
                     X_all_level1_list.append(all_sim.reshape(-1, 1))
                     print(f"    Added sim_to_train_mean feature")
                 elif feat_name == 'cluster_density':
@@ -1841,7 +1936,9 @@ def generate_test_predictions_from_stacking(
     df_train: Optional[pd.DataFrame] = None,
     features_df: Optional[pd.DataFrame] = None,
     train_fps_cache: Optional[Dict[Tuple[str, ...], List]] = None,
-    query_fps_cache: Optional[Dict[str, Any]] = None
+    query_fps_cache: Optional[Dict[str, Any]] = None,
+    similarity_matrix: Optional[np.ndarray] = None,
+    similarity_matrix_ids: Optional[np.ndarray] = None
 ) -> pd.DataFrame:
     """Generate test predictions using stacking ensemble (CV meta-learners).
 
@@ -1903,7 +2000,7 @@ def generate_test_predictions_from_stacking(
 
         for feat_name in derived_features:
             if feat_name == 'sim_to_train_mean':
-                test_sim = compute_sim_to_train_mean(common_ids, all_train_ids, df_train, train_fps_cache=train_fps_cache, query_fps_cache=query_fps_cache)
+                test_sim = compute_sim_to_train_mean(common_ids, all_train_ids, df_train, train_fps_cache=train_fps_cache, query_fps_cache=query_fps_cache, similarity_matrix=similarity_matrix, similarity_matrix_ids=similarity_matrix_ids)
                 X_test_level1_list.append(test_sim.reshape(-1, 1))
                 print(f"    Added sim_to_train_mean feature")
 

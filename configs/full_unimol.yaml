@@ -15,9 +15,12 @@ metrics:
 model:
   name: "unimol"
   params:
+    n_jobs: -1
     max_epochs: 1000
-    batch_size: 32  # Smaller batch size due to 3D structure processing
+    batch_size: 32  # Batch size per GPU (when using DDP, effective batch size = batch_size * num_gpus)
     learning_rate: 0.0001  # Lower LR for foundation model fine-tuning
+    # devices: null  # Optional: Number of GPUs to use. If null, automatically detects from CUDA_VISIBLE_DEVICES.
+    #                # Example: devices: 4 for 4 GPUs, or set CUDA_VISIBLE_DEVICES=0,1,2,3 and leave devices as null
     hidden_size: 300
     ffn_num_layers: 2
     dropout: 0.1

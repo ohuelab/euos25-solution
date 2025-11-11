@@ -1,0 +1,36 @@
+# Configuration for optimize_ensemble_stacking_v2.py
+# Stacking ensemble optimization with feature support
+
+# Whether to use additional molecular features (ECFP4, RDKit2D, etc.) in meta-model
+use_additional_features: false
+
+# List of feature groups to include if use_additional_features is true
+# Options: 'ecfp4', 'rdkit2d', 'mordred', 'chemeleon', 'chemberta', 'custom'
+feature_groups:
+  # - 'rdkit2d'
+  # - 'mordred'
+
+# Directory containing feature parquet files
+feature_dir: 'feats'
+
+# Whether to use derived features (computed from training data per fold)
+use_derived_features: false
+
+# List of derived features to compute
+# Options: 'sim_to_train_mean', 'cluster_density', 'model_std'
+derived_features:
+  # - 'sim_to_train_mean'
+  - 'cluster_density'
+  - 'model_std'
+
+# Number of clusters for cluster_density feature
+cluster_n_clusters: 50
+
+# Model selection parameters
+top_n_models: 20  # Number of top models to consider by CV score
+lambda_correlation: 0  # Correlation penalty coefficient for diversity selection
+max_diverse_models: 15  # Maximum number of diverse models to select
+
+# Optuna optimization parameters
+n_trials: 100  # Number of Optuna trials per fold
+

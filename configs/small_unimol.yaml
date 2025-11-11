@@ -1,0 +1,54 @@
+# Small Uni-Mol configuration for testing
+# Uses Uni-Mol-2 pretrained model for molecular property prediction
+
+seed: 42
+folds: 5
+scaffold_min_size: 10
+
+# Task configuration
+task: "y_trans_any"  # Will be overridden by --task option in CLI
+metrics:
+  - "roc_auc"
+  - "pr_auc"
+
+# Model configuration
+model:
+  name: "unimol"
+  params:
+    n_jobs: 1  # Use 1 job for small test
+    max_epochs: 5  # Small number of epochs for testing
+    batch_size: 8  # Small batch size for testing
+    learning_rate: 0.0001
+    hidden_size: 300
+    ffn_num_layers: 2
+    dropout: 0.1
+    pretrained_model: "unimol2"  # Use unimol2 (84M model)
+    pretrained_model_path: null
+    freeze_backbone: false
+    freeze_layers: null
+    optimize_3d: true
+    remove_hs: true  # UniMolV2 requires remove_hs=True
+    checkpoint_dir: "outputs/small_unimol/checkpoints"
+    cache_dir: "data/processed/unimol_3d_cache_small"
+
+# No featurizers needed for Uni-Mol-2
+featurizers: []
+
+# Imbalance handling
+imbalance:
+  use_pos_weight: false
+  pos_weight_from_data: false
+  use_sampling: false
+  use_focal_loss: false
+
+# Optuna (disabled for testing)
+optuna:
+  enable: false
+
+# Early stopping
+early_stopping_rounds: 3  # Small patience for testing
+early_stopping_metric: "roc_auc"
+
+# Logging
+log_level: "INFO"
+
