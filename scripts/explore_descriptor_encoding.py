@@ -291,7 +291,41 @@ def explore_descriptor_encoding(
 
     # Prepare labels
     df = df.set_index("ID")
-    labels = df[label_col]
+
+    # Check if label column exists, try alternatives if not
+    actual_label_col = label_col
+    if label_col not in df.columns:
+        # Try alternative column names (in order of preference)
+        possible_labels = []
+        if "Fluorescence" in label_col or "fluo" in label_col.lower():
+            possible_labels = [
+                "Fluorescence (qualitative)",
+                "Fluorescence",
+            ]
+        elif "Transmittance" in label_col or "trans" in label_col.lower():
+            possible_labels = [
+                "Transmittance (qualitative)",
+                "Transmittance",
+            ]
+        else:
+            possible_labels = [
+                f"{label_col} (qualitative)",
+                label_col,
+            ]
+
+        for possible_label in possible_labels:
+            if possible_label in df.columns:
+                actual_label_col = possible_label
+                logger.info(f"Label column '{label_col}' not found, using '{actual_label_col}' instead")
+                break
+
+        if actual_label_col not in df.columns:
+            raise ValueError(
+                f"Label column '{label_col}' not found in {data_path}. "
+                f"Available columns: {df.columns.tolist()}"
+            )
+
+    labels = df[actual_label_col]
     if labels.dtype != int:
         # Convert to binary if needed
         labels = (labels != 0).astype(int)

@@ -2,12 +2,17 @@
 
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
+from sklearn.model_selection import StratifiedKFold
 
 from euos25.config import Config
+from euos25.featurizers.categorical_encoding import (
+    LabelEncodingFeaturizer,
+    TargetEncodingFeaturizer,
+)
 from euos25.models.base import ClfModel
 from euos25.models.lgbm import LGBMClassifier
 from euos25.models.catboost import CatBoostClassifier
@@ -22,6 +27,158 @@ from euos25.utils.io import load_json, load_parquet
 from euos25.utils.metrics import calc_metrics, save_fold_metrics
 
 logger = logging.getLogger(__name__)
+
+
+def apply_categorical_encoding(
+    X_train: pd.DataFrame,
+    y_train: np.ndarray,
+    X_valid: pd.DataFrame,
+    config: Config,
+    nested_cv: bool = True,
+    inner_cv_folds: int = 3,
+    seed: int = 42,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Apply categorical encoding to features.
+
+    Args:
+        X_train: Training features
+        y_train: Training labels
+        X_valid: Validation features
+        config: Pipeline configuration
+        nested_cv: Whether to use nested CV for target encoding
+        inner_cv_folds: Number of inner CV folds (if nested_cv=True)
+        seed: Random seed
+
+    Returns:
+        Tuple of (X_train_encoded, X_valid_encoded)
+    """
+    encoding_config = config.categorical_encoding
+    if not encoding_config.enable:
+        return X_train, X_valid
+
+    encoded_train_list = []
+    encoded_valid_list = []
+
+    # Determine descriptor columns
+    descriptor_columns = encoding_config.descriptor_columns
+    if descriptor_columns is None and encoding_config.auto_detect:
+        from euos25.featurizers.categorical_encoding import detect_categorical_descriptors
+
+        descriptor_columns = detect_categorical_descriptors(
+            X_train, max_unique_values=encoding_config.max_unique_values
+        )
+
+    if descriptor_columns is None or len(descriptor_columns) == 0:
+        logger.warning("No descriptor columns found for categorical encoding")
+        return X_train, X_valid
+
+    # Label encoding
+    if encoding_config.use_label_encoding:
+        label_encoder = LabelEncodingFeaturizer(
+            descriptor_columns=descriptor_columns,
+            max_unique_values=encoding_config.max_unique_values,
+            auto_detect=False,
+        )
+        label_encoder.fit(X_train)
+        X_train_label = label_encoder.transform(X_train)
+        X_valid_label = label_encoder.transform(X_valid)
+        encoded_train_list.append(X_train_label)
+        encoded_valid_list.append(X_valid_label)
+        logger.info(f"Added {len(X_train_label.columns)} label-encoded features")
+
+    # Target encoding
+    if encoding_config.use_target_encoding:
+        if nested_cv:
+            # Nested CV: create inner splits and fit encoders on inner train
+            skf = StratifiedKFold(
+                n_splits=inner_cv_folds, shuffle=True, random_state=seed
+            )
+            train_indices = np.arange(len(X_train))
+            inner_splits = list(skf.split(train_indices, y_train))
+
+            # For training set: use nested CV approach
+            # For each sample in train, find which inner folds it belongs to
+            # and use the encoder from the inner train folds it's NOT in
+            train_target_encoded_dict = {}
+            for inner_fold_idx, (inner_train_idx, inner_valid_idx) in enumerate(inner_splits):
+                X_inner_train = X_train.iloc[inner_train_idx]
+                y_inner_train = y_train[inner_train_idx]
+                X_inner_valid = X_train.iloc[inner_valid_idx]
+
+                # Fit target encoder on inner train
+                target_encoder = TargetEncodingFeaturizer(
+                    descriptor_columns=descriptor_columns,
+                    max_unique_values=encoding_config.max_unique_values,
+                    auto_detect=False,
+                    smoothing=encoding_config.target_encoding_smoothing,
+                )
+                target_encoder.fit(X_inner_train, pd.Series(y_inner_train, index=X_inner_train.index))
+
+                # Transform inner valid (using inner train encoder) - this is the key point
+                X_inner_valid_target = target_encoder.transform(X_inner_valid)
+
+                # Store encoded values for inner valid samples
+                for valid_idx, valid_id in enumerate(X_inner_valid.index):
+                    if valid_id not in train_target_encoded_dict:
+                        train_target_encoded_dict[valid_id] = []
+                    train_target_encoded_dict[valid_id].append(X_inner_valid_target.iloc[valid_idx])
+
+            # Average across inner folds for each training sample
+            X_train_target_list = []
+            for train_id in X_train.index:
+                if train_id in train_target_encoded_dict:
+                    # Average across inner folds
+                    avg_encoded = pd.concat(train_target_encoded_dict[train_id], axis=0).mean()
+                    X_train_target_list.append(avg_encoded)
+                else:
+                    # Sample was in all inner train sets, fit encoder on full train
+                    target_encoder_full = TargetEncodingFeaturizer(
+                        descriptor_columns=descriptor_columns,
+                        max_unique_values=encoding_config.max_unique_values,
+                        auto_detect=False,
+                        smoothing=encoding_config.target_encoding_smoothing,
+                    )
+                    target_encoder_full.fit(X_train, pd.Series(y_train, index=X_train.index))
+                    single_encoded = target_encoder_full.transform(X_train.loc[[train_id]])
+                    X_train_target_list.append(single_encoded.iloc[0])
+
+            X_train_target = pd.DataFrame(X_train_target_list, index=X_train.index)
+
+            # For validation set, fit on full train and transform
+            target_encoder_full = TargetEncodingFeaturizer(
+                descriptor_columns=descriptor_columns,
+                max_unique_values=encoding_config.max_unique_values,
+                auto_detect=False,
+                smoothing=encoding_config.target_encoding_smoothing,
+            )
+            target_encoder_full.fit(X_train, pd.Series(y_train, index=X_train.index))
+            X_valid_target = target_encoder_full.transform(X_valid)
+
+            encoded_train_list.append(X_train_target)
+            encoded_valid_list.append(X_valid_target)
+        else:
+            # Standard: fit on train, transform valid
+            target_encoder = TargetEncodingFeaturizer(
+                descriptor_columns=descriptor_columns,
+                max_unique_values=encoding_config.max_unique_values,
+                auto_detect=False,
+                smoothing=encoding_config.target_encoding_smoothing,
+            )
+            target_encoder.fit(X_train, pd.Series(y_train, index=X_train.index))
+            X_train_target = target_encoder.transform(X_train)
+            X_valid_target = target_encoder.transform(X_valid)
+            encoded_train_list.append(X_train_target)
+            encoded_valid_list.append(X_valid_target)
+
+        logger.info(f"Added {len(encoded_valid_list[-1].columns)} target-encoded features")
+
+    # Concatenate all encoded features
+    if encoded_train_list:
+        X_train_encoded = pd.concat([X_train] + encoded_train_list, axis=1)
+        X_valid_encoded = pd.concat([X_valid] + encoded_valid_list, axis=1)
+        return X_train_encoded, X_valid_encoded
+    else:
+        return X_train, X_valid
 
 
 def create_model(config: Config, checkpoint_dir: Optional[str] = None) -> ClfModel:
@@ -273,6 +430,21 @@ def train_fold(
                 # Use the most recent checkpoint
                 resume_ckpt = str(sorted(ckpt_files, key=lambda x: x.stat().st_mtime)[-1])
                 logger.info(f"  Found checkpoint to resume from: {resume_ckpt}")
+
+    # Apply categorical encoding if enabled
+    encoding_config = config.categorical_encoding
+    if encoding_config.enable:
+        logger.info("Applying categorical encoding...")
+        use_nested_cv = encoding_config.use_target_encoding
+        X_train, X_valid = apply_categorical_encoding(
+            X_train,
+            y_train,
+            X_valid,
+            config,
+            nested_cv=use_nested_cv,
+            inner_cv_folds=encoding_config.nested_cv_folds,
+            seed=config.seed,
+        )
 
     # Create model
     model = create_model(config, checkpoint_dir=checkpoint_dir)
@@ -589,6 +761,23 @@ def train_full(
     X_full = features.loc[common_ids]
     y_full = labels.loc[common_ids].values
 
+    # Apply categorical encoding if enabled
+    # For full model without split, we fit on all data (no validation set)
+    encoding_config = config.categorical_encoding
+    if encoding_config.enable:
+        logger.info("Applying categorical encoding for full model...")
+        # Create dummy valid set for encoding (will not be used for training)
+        # We still need to fit encoders on full data
+        X_full, _ = apply_categorical_encoding(
+            X_full,
+            y_full,
+            X_full.copy(),  # Dummy valid set
+            config,
+            nested_cv=True,  # Nested CV for full model
+            inner_cv_folds=encoding_config.nested_cv_folds,
+            seed=config.seed,
+        )
+
     logger.info("=" * 50)
     logger.info("Training on full dataset")
     logger.info(f"  Full dataset: {len(y_full)} samples, pos={y_full.sum()}")
@@ -864,6 +1053,23 @@ def train_full_with_split(
 
     X_valid = features.loc[fold_0_valid_ids]
     y_valid = labels.loc[fold_0_valid_ids].values
+
+    # Apply categorical encoding if enabled
+    # For full model, we use CV splits: fit encoders on each fold's train, transform on valid
+    encoding_config = config.categorical_encoding
+    if encoding_config.enable:
+        logger.info("Applying categorical encoding for full model...")
+        # For full model with split, we fit on train and transform on valid
+        # (similar to standard CV, but using fold 0 split)
+        X_train, X_valid = apply_categorical_encoding(
+            X_train,
+            y_train,
+            X_valid,
+            config,
+            nested_cv=True,  # Nested CV for full model
+            inner_cv_folds=encoding_config.nested_cv_folds,
+            seed=config.seed,
+        )
 
     # Get binary labels if available (for regression/ranking)
     binary_labels_train = None
