@@ -130,7 +130,7 @@ def evaluate_encoding_for_descriptor(
                 verbose=-1,
             )
             baseline_model.fit(
-                X_train_baseline, y_train.values, eval_set=[(X_valid_baseline, y_valid.values)]
+                X_train_baseline, y_train.values, eval_set=(X_valid_baseline, y_valid.values)
             )
             baseline_pred = baseline_model.predict_proba(X_valid_baseline)
             baseline_score = calc_roc_auc(y_valid.values, baseline_pred)
@@ -161,7 +161,7 @@ def evaluate_encoding_for_descriptor(
                         verbose=-1,
                     )
                     label_model.fit(
-                        X_train_label, y_train.values, eval_set=[(X_valid_label, y_valid.values)]
+                        X_train_label, y_train.values, eval_set=(X_valid_label, y_valid.values)
                     )
                     label_pred = label_model.predict_proba(X_valid_label)
                     label_score = calc_roc_auc(y_valid.values, label_pred)
@@ -217,7 +217,7 @@ def evaluate_encoding_for_descriptor(
                         inner_model.fit(
                             X_inner_train_target,
                             y_inner_train.values,
-                            eval_set=[(X_inner_valid_target, y_inner_valid.values)],
+                            eval_set=(X_inner_valid_target, y_inner_valid.values),
                         )
                         inner_pred = inner_model.predict_proba(X_inner_valid_target)
                         inner_score = calc_roc_auc(y_inner_valid.values, inner_pred)

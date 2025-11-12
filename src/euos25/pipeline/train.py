@@ -1024,11 +1024,66 @@ def train_full_with_split(
         # For UniMol, check if model exists (similar to ChemProp)
         if full_model_dir.exists() and (full_model_dir.is_file() or full_model_dir.is_dir()):
             logger.info("=" * 50)
-            logger.info("Full model already exists, skipping training")
+            logger.info("Full model already exists, loading model for validation metrics calculation")
             logger.info(f"  Model path: {full_model_dir}")
             logger.info("=" * 50)
-            # Note: UniMolModel.load_from_checkpoint is not fully implemented yet
-            logger.warning("UniMolModel checkpoint loading not fully implemented. Skipping checkpoint load.")
+            # Load model to calculate validation metrics
+            from euos25.models.unimol import UniMolModel
+            try:
+                model = UniMolModel.load_from_checkpoint(
+                    str(full_model_dir),
+                    **config.model.params,
+                    random_seed=config.seed,
+                    early_stopping_rounds=config.early_stopping_rounds,
+                    early_stopping_metric=config.early_stopping_metric,
+                )
+                # Calculate and save validation metrics for existing model
+                # Get fold 0 split for validation
+                fold_0_data = splits.get("fold_0")
+                if fold_0_data is not None:
+                    # Prepare validation data
+                    fold_0_valid_pos_indices = fold_0_data["valid"]
+                    fold_0_valid_ids = features.index[fold_0_valid_pos_indices]
+                    X_valid = features.loc[fold_0_valid_ids]
+                    y_valid = labels.loc[fold_0_valid_ids].values
+
+                    # Calculate metrics on validation set
+                    y_pred = model.predict_proba(X_valid)
+                    if isinstance(y_pred, np.ndarray) and y_pred.ndim == 2:
+                        y_pred_proba = y_pred[:, 1] if y_pred.shape[1] > 1 else y_pred[:, 0]
+                    else:
+                        y_pred_proba = y_pred
+
+                    metrics = calc_metrics(y_valid, y_pred_proba, metrics=config.metrics)
+                    logger.info("Validation metrics (recalculated):")
+                    for metric_name, score in metrics.items():
+                        logger.info(f"  {metric_name}: {score:.6f}")
+
+                    # Save validation metrics to file
+                    if full_model_dir.is_file():
+                        metrics_dir = full_model_dir.parent
+                    else:
+                        metrics_dir = full_model_dir
+
+                    metrics_path = metrics_dir / "validation_metrics.json"
+                    import json
+                    with open(metrics_path, "w") as f:
+                        json.dump(metrics, f, indent=2)
+                    logger.info(f"Saved validation metrics to {metrics_path}")
+
+                    # Also save as CSV for consistency with other models
+                    metrics_csv_path = metrics_dir / "validation_metrics.csv"
+                    metrics_df = pd.DataFrame([metrics])
+                    metrics_df.to_csv(metrics_csv_path, index=False)
+                    logger.info(f"Saved validation metrics to {metrics_csv_path}")
+                else:
+                    logger.warning("fold_0 not found in splits, skipping validation metrics calculation")
+
+                logger.info("=" * 50)
+                return model
+            except Exception as e:
+                logger.warning(f"Failed to load UniMol model: {e}. Will train new model.")
+                # Continue to train new model
 
     # Get fold 0 split for validation
     fold_0_data = splits.get("fold_0")
@@ -1139,6 +1194,7 @@ def train_full_with_split(
             resume_from_checkpoint=resume_ckpt,
             task_name=actual_task_name,
             fold_name="full",
+            output_dir=str(full_model_dir.parent),  # Pass parent directory (task/model directory)
         )
     else:
         # Generic fallback
@@ -1156,6 +1212,27 @@ def train_full_with_split(
     logger.info("Validation metrics:")
     for metric_name, score in metrics.items():
         logger.info(f"  {metric_name}: {score:.6f}")
+
+    # Save validation metrics to file (for full-only mode)
+    if config.model.name == "unimol":
+        # For UniMol, save metrics to models directory
+        # full_model_dir might be a file (for .ckpt) or directory, so use parent if it's a file
+        if full_model_dir.is_file():
+            metrics_dir = full_model_dir.parent
+        else:
+            metrics_dir = full_model_dir
+
+        metrics_path = metrics_dir / "validation_metrics.json"
+        import json
+        with open(metrics_path, "w") as f:
+            json.dump(metrics, f, indent=2)
+        logger.info(f"Saved validation metrics to {metrics_path}")
+
+        # Also save as CSV for consistency with other models
+        metrics_csv_path = metrics_dir / "validation_metrics.csv"
+        metrics_df = pd.DataFrame([metrics])
+        metrics_df.to_csv(metrics_csv_path, index=False)
+        logger.info(f"Saved validation metrics to {metrics_csv_path}")
 
     # Save full model (full_model_dir already defined above)
     model.save(str(full_model_dir))

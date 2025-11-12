@@ -1,6 +1,7 @@
 """Uni-Mol-2 model wrapper for binary classification and regression."""
 
 import hashlib
+import json
 import logging
 import os
 import pickle
@@ -14,7 +15,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from lightning import pytorch as pl
-from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
+from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint, Callback
 from lightning.pytorch.strategies import DDPStrategy
 from rdkit import Chem
 from rdkit.Chem import AllChem
@@ -145,6 +146,77 @@ class BinaryROCAUCMetric(Metric):
         except Exception as e:
             logger.warning(f"Error computing ROC AUC: {e}. Returning 0.5")
             return torch.tensor(0.5, device=preds.device)
+
+
+class ValidationMetricsCallback(Callback):
+    """Callback to save validation metrics to file after each epoch."""
+
+    def __init__(self, metrics_dir: Optional[Path] = None):
+        """Initialize callback.
+
+        Args:
+            metrics_dir: Directory to save metrics files. If None, metrics are not saved.
+        """
+        super().__init__()
+        self.metrics_dir = metrics_dir
+        self.metrics_history = []
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        """Save validation metrics after each epoch."""
+        if self.metrics_dir is None:
+            return
+
+        # Get logged metrics
+        logged_metrics = trainer.logged_metrics
+
+        # Extract validation metrics
+        epoch_metrics = {"epoch": trainer.current_epoch}
+
+        # Get val_loss
+        if "val_loss" in logged_metrics:
+            epoch_metrics["val_loss"] = float(logged_metrics["val_loss"].cpu().item())
+
+        # Get other validation metrics (val/{metric_name})
+        for key, value in logged_metrics.items():
+            if key.startswith("val/"):
+                metric_name = key.replace("val/", "")
+                # Convert tensor to float
+                if hasattr(value, "cpu"):
+                    epoch_metrics[metric_name] = float(value.cpu().item())
+                else:
+                    epoch_metrics[metric_name] = float(value)
+
+        # Map metric names to standard names
+        # BinaryAUROC -> roc_auc, BinaryROCAUCMetric -> roc_auc
+        if "BinaryAUROC" in epoch_metrics:
+            epoch_metrics["roc_auc"] = epoch_metrics.pop("BinaryAUROC")
+        elif "BinaryROCAUCMetric" in epoch_metrics:
+            epoch_metrics["roc_auc"] = epoch_metrics.pop("BinaryROCAUCMetric")
+
+        # BinaryAveragePrecision -> pr_auc
+        if "BinaryAveragePrecision" in epoch_metrics:
+            epoch_metrics["pr_auc"] = epoch_metrics.pop("BinaryAveragePrecision")
+
+        # Add to history
+        self.metrics_history.append(epoch_metrics)
+
+        # Save to file after each epoch
+        self.metrics_dir.mkdir(parents=True, exist_ok=True)
+
+        # Save as CSV
+        csv_path = self.metrics_dir / "validation_metrics_per_epoch.csv"
+        df = pd.DataFrame(self.metrics_history)
+        df.to_csv(csv_path, index=False)
+
+        # Save as JSON (latest epoch only)
+        json_path = self.metrics_dir / "validation_metrics.json"
+        with open(json_path, "w") as f:
+            json.dump(epoch_metrics, f, indent=2)
+
+        # Also save full history as JSON
+        json_history_path = self.metrics_dir / "validation_metrics_history.json"
+        with open(json_history_path, "w") as f:
+            json.dump(self.metrics_history, f, indent=2)
 
 
 # collate_fn is now provided by the model's batch_collate_fn method
@@ -1032,6 +1104,7 @@ class UniMolModel(BaseClfModel):
         resume_from_checkpoint: Optional[str] = None,
         task_name: Optional[str] = None,
         fold_name: Optional[str] = None,
+        output_dir: Optional[str] = None,
     ) -> "UniMolModel":
         """Train the Uni-Mol-2 model.
 
@@ -1044,6 +1117,8 @@ class UniMolModel(BaseClfModel):
             resume_from_checkpoint: Path to checkpoint file to resume training from
             task_name: Task name for organizing checkpoints (e.g., "transmittance340")
             fold_name: Fold name for organizing checkpoints (e.g., "fold_0", "full")
+            output_dir: Output directory for saving metrics (for full-only mode).
+                       If provided and fold_name is "full", metrics will be saved to output_dir/full_model.
 
         Returns:
             Self
@@ -1142,6 +1217,18 @@ class UniMolModel(BaseClfModel):
 
         # Setup callbacks
         callbacks = [checkpoint_callback]
+
+        # Add validation metrics callback for full-only mode
+        # Save metrics to output_dir if provided (for full-only mode), otherwise use checkpoint_dir
+        if output_dir is not None and fold_name == "full":
+            # For full-only mode, save to models directory
+            # output_dir is the parent of full_model, so we save to output_dir directly
+            metrics_dir = Path(output_dir)
+        else:
+            # For CV mode, save to checkpoint_dir
+            metrics_dir = checkpoint_dir
+        metrics_callback = ValidationMetricsCallback(metrics_dir=metrics_dir)
+        callbacks.append(metrics_callback)
 
         # Setup early stopping
         if (
