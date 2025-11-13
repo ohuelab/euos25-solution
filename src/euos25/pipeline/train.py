@@ -61,6 +61,17 @@ def apply_categorical_encoding(
 
     # Determine descriptor columns
     descriptor_columns = encoding_config.descriptor_columns
+
+    # Check for task-specific descriptors (takes priority over descriptor_columns)
+    if encoding_config.task_specific_descriptors is not None:
+        task_name = config.task if config.task else (config.tasks[0] if config.tasks else None)
+        if task_name and task_name in encoding_config.task_specific_descriptors:
+            descriptor_columns = encoding_config.task_specific_descriptors[task_name]
+            logger.info(
+                f"Using task-specific descriptors for {task_name}: "
+                f"{len(descriptor_columns)} descriptors"
+            )
+
     if descriptor_columns is None and encoding_config.auto_detect:
         from euos25.featurizers.categorical_encoding import detect_categorical_descriptors
 

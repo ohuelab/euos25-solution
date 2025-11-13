@@ -76,6 +76,8 @@ class CategoricalEncodingConfig(BaseModel):
     auto_detect: bool = True  # Auto-detect categorical descriptors if descriptor_columns is None
     nested_cv_folds: int = 3  # Number of inner CV folds for nested CV
     target_encoding_smoothing: float = 1.0  # Smoothing parameter for target encoding
+    # Task-specific descriptor columns (overrides descriptor_columns if task matches)
+    task_specific_descriptors: Optional[Dict[str, List[str]]] = None
 
 
 class OptunaConfig(BaseModel):
