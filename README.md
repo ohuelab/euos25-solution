@@ -34,8 +34,7 @@ This solution uses a weighted ensemble of diverse models with different molecula
 ## Ensemble Strategy
 
 **Task-specific weighted ensembles:**
-- Transmittance(340): CV-based weighted ensemble
-- Other tasks: Multi-layer ensemble combining multiple model types
+Weighted-average ensemble based on CV score
 
 **Key techniques:**
 - Focal Loss for class imbalance
