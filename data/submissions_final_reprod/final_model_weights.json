@@ -1,0 +1,122 @@
+{
+  "trans_340": {
+    "models": [
+      "full_chemprop",
+      "full_chemprop_focal",
+      "full_chemeleon",
+      "full_chemeleon_focal",
+      "full_chemeleon_lgbm",
+      "noopt_chemeleon",
+      "lgbm_trans_reg",
+      "full_catboost_optuna",
+      "full_chemeleon_catboost",
+      "full_feat_catboost",
+      "full",
+      "fullx",
+      "multitask_trans_chemprop"
+    ],
+    "weights": [
+      0.06703620287297998,
+      0.06754836086834318,
+      0.11060187915618287,
+      0.11659461609024017,
+      0.07912878843076744,
+      0.07505957760047315,
+      0.07216826273299355,
+      0.0704118719142164,
+      0.05829730804512009,
+      0.07398611597920261,
+      0.07244064922240559,
+      0.07244064922240559,
+      0.06428571786466934
+    ],
+    "description": "Top 40% CV ensemble (0.6 quantile)"
+  },
+  "trans_450": {
+    "models": [
+      "full_unimol_focal",
+      "full_unimol_focal_310m",
+      "full_focal_optuna",
+      "full_feat_catboost",
+      "full_catboost_optuna",
+      "lgbm_trans_reg",
+      "full_chemeleon_focal",
+      "full_chemeleon",
+      "full_chemeleon_catboost"
+    ],
+    "weights": [
+      0.2222,
+      0.2222,
+      0.09593429945702059,
+      0.09495357590259544,
+      0.0911675403915429,
+      0.08888621118128248,
+      0.06963222200004285,
+      0.06705900133900541,
+      0.047967149728510294
+    ],
+    "description": "Multi-layer ensemble: base (55.56%) + UniMol-84M (22.22%) + UniMol-310M (22.22%)"
+  },
+  "fluo_340_450": {
+    "models": [
+      "full_unimol_focal",
+      "full_unimol_focal_310m",
+      "full_chemprop",
+      "full_chemeleon",
+      "full_chemeleon_focal",
+      "lgbm_reg_optuna",
+      "multitask_fluo_chemprop",
+      "lgbm_trans_reg",
+      "noopt_ecfp",
+      "noopt_chemeleon",
+      "fullx",
+      "full"
+    ],
+    "weights": [
+      0.2222,
+      0.2222,
+      0.10010102567630486,
+      0.08910658588548806,
+      0.08834429692195529,
+      0.08131694920547973,
+      0.07551268547321925,
+      0.04972926425047295,
+      0.03011546784694396,
+      0.016754451892672204,
+      0.015377437175273201,
+      0.009241835672190491
+    ],
+    "description": "Multi-layer ensemble: base (55.56%) + UniMol-84M (22.22%) + UniMol-310M (22.22%)"
+  },
+  "fluo_480": {
+    "models": [
+      "full_unimol_focal",
+      "full_unimol_focal_310m",
+      "full_focal_s100",
+      "full_focal_optuna",
+      "lgbm_trans_reg-fluo_480",
+      "multitask_fluo_chemprop",
+      "full_focal",
+      "lgbm_trans_reg",
+      "noopt_chemberta_catboost",
+      "noopt_chemeleon_catboost",
+      "full_optuna",
+      "full_catboost_optuna"
+    ],
+    "weights": [
+      0.2222,
+      0.2222,
+      0.0928780884761507,
+      0.08790325368458402,
+      0.08734352155322363,
+      0.07596698258150357,
+      0.07474351613803834,
+      0.043060825268683926,
+      0.03593466244786619,
+      0.03501435681271474,
+      0.019819516466397347,
+      0.002935276570837543
+    ],
+    "description": "Multi-layer ensemble: base (55.56%) + UniMol-84M (22.22%) + UniMol-310M (22.22%)"
+  }
+}
