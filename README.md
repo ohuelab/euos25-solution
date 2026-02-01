@@ -1,4 +1,5 @@
 # EUOS25 Solution
+<img width="741" height="418" alt="image" src="https://github.com/user-attachments/assets/735bcd5b-d32f-4a9e-be4e-4c23cc23f327" />
 
 ## Overview
 
